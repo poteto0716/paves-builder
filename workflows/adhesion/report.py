@@ -207,6 +207,28 @@ def main(argv=None):
 
     name, p, box = latest
     M = I.metrics(p, box)
+    if (runs / '09_pull/summary.json').exists():
+        st = T.load_xml(runs / '09_pull/state.xml')
+        P = I.metrics(T.positions_A(st), T.box_A(st))
+        pf_all = np.loadtxt(runs / '09_pull/pull_force.csv', delimiter=',', skiprows=1)
+        w = min(2000, len(pf_all))
+        smooth_f = np.convolve(pf_all[:, 6], np.ones(w) / w, mode='same')
+        k = int(np.argmax(smooth_f[w // 2:len(smooth_f) - w // 2]) + w // 2) if len(pf_all) > w else int(np.argmax(pf_all[:, 6]))
+        work = float(np.trapezoid(pf_all[:, 5], pf_all[:, 2]))
+        area = float(box[0] * box[1])
+        metrics.append({'k': 'Peak pull force', 'v': f'{smooth_f[k]:.1f}', 'u': 'nN',
+                        'd': f'{w * 0.25 / 1000:.1f}-ps mean, at {pf_all[k, 1]:.0f} ps (reference +{pf_all[k, 2] - pf_all[0, 2]:.1f} Å); '
+                             f'spring work {work / area * 694.77:.0f} mJ/m²'})
+        metrics.append({'k': 'Contact after pulling', 'v': f"{P['c3']:,}", 'u': f"of {M['c3']:,}",
+                        'd': 'film atoms within 3 Å of silica, end of pull vs before; a remaining layer means failure inside the film'})
+        c2, pp2, ps2 = P['profile']
+        keep2 = c2 < P['extent'][1] + 15
+        charts.append({'title': 'Density after pulling', 'sub': 'end of 09 · where the film thinned or separated',
+                       'x': 'z (Å)', 'unit': 'g/cm³', 'xd': 1, 'yd': 3,
+                       'series': [{'name': 'silica', 'short': 'SiO₂', 'color': '--s2', 'dy': 9,
+                                   'pts': [[float(z), float(v)] for z, v in zip(c2[keep2], ps2[keep2])]},
+                                  {'name': 'polymer film', 'short': 'polymer', 'color': '--s1', 'dy': -7,
+                                   'pts': [[float(z), float(v)] for z, v in zip(c2[keep2], pp2[keep2])]}]})
     ctr, pp, ps = M['profile']
     keep = ctr < M['extent'][1] + 15
     charts.append({'title': 'Density across the interface', 'sub': f'end of {name} · 1-Å slabs over the full cell area',
