@@ -1,0 +1,38 @@
+# OPLS-AA alkane subset (Jorgensen, Maxwell and Tirado-Rives, JACS 1996).
+units          real
+special_bonds  lj 0.0 0.0 0.5  coul 0.0 0.0 0.5
+pair_style     lj/cut/coul/cut 12.0 12.0
+pair_modify    mix geometric
+dielectric     1.0
+
+atom     CT3   12.011   -0.180   3.500   0.066
+atom     CT2   12.011   -0.120   3.500   0.066
+atom     HC     1.008    0.060   2.500   0.030
+
+type     CT3   C        4         3
+type     CT2   C        4         2
+type     HC    H        1         *
+
+bond      harmonic  CT3  CT3   268.0   1.529
+bond      harmonic  CT3  CT2   268.0   1.529
+bond      harmonic  CT2  CT2   268.0   1.529
+bond      harmonic  CT3  HC    340.0   1.090
+bond      harmonic  CT2  HC    340.0   1.090
+
+angle     harmonic  X    CT2  X      33.0   107.8
+angle     harmonic  CT2  CT2  CT2    58.35  112.7
+angle     harmonic  CT3  CT2  CT2    58.35  112.7
+angle     harmonic  CT3  CT2  CT3    58.35  112.7
+angle     harmonic  X    CT2  HC     37.5   110.7
+angle     harmonic  HC   CT2  HC     33.0   107.8
+angle     harmonic  X    CT3  HC     37.5   110.7
+angle     harmonic  HC   CT3  HC     33.0   107.8
+angle     harmonic  CT2  CT3  HC     37.5   110.7
+
+dihedral   opls   X    CT2  CT2  X      1.740  -0.157   0.279   0.000
+dihedral   opls   X    CT2  CT3  X      0.000   0.000   0.366   0.000
+dihedral   opls   HC   CT2  CT2  HC     0.000   0.000   0.318   0.000
+dihedral   opls   HC   CT2  CT3  HC     0.000   0.000   0.318   0.000
+dihedral   opls   X    X    X    X      0.000   0.000   0.000   0.000
+improper   harmonic  X X X X   0.0  0.0
+

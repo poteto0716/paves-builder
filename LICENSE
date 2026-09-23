@@ -1,8 +1,8 @@
-# PolyCE Binary Software License
+# polyse Binary Software License
 
 Copyright (c) 2026 Shuichi Uehara. All rights reserved.
 
-PolyCE ("Software") is proprietary software owned by Shuichi Uehara.
+polyse ("Software") is proprietary software owned by Shuichi Uehara.
 
 This license grants only the limited rights expressly stated below. No ownership, source code rights, intellectual property rights, or other rights are transferred to the user.
 
@@ -39,7 +39,7 @@ Except where expressly authorized by Shuichi Uehara, the user may not:
 
 6. incorporate, embed, bundle, or redistribute the Software as part of another software product, service, platform, appliance, or commercial offering;
 
-7. use the Software for the purpose of developing software that reproduces substantially similar functionality based on non-public implementation details obtained from PolyCE;
+7. use the Software for the purpose of developing software that reproduces substantially similar functionality based on non-public implementation details obtained from polyse;
 
 8. remove, obscure, or alter copyright notices, product names, attribution notices, or other proprietary notices.
 
@@ -47,9 +47,9 @@ Except where expressly authorized by Shuichi Uehara, the user may not:
 
 This license applies only to binaries, documentation, examples, and other files explicitly distributed under this license.
 
-No license or right to the PolyCE source code is granted.
+No license or right to the polyse source code is granted.
 
-Publication of binary files in a publicly accessible repository does not make PolyCE open-source software.
+Publication of binary files in a publicly accessible repository does not make polyse open-source software.
 
 ## 4. Commercial and Business Use
 

@@ -1,0 +1,8 @@
+# Shared PCFF parameters and typing for the atomistic examples.
+units          real
+special_bonds  lj 0.0 0.0 1.0  coul 0.0 0.0 1.0
+pair_style     lj/class2/coul/cut  9.5  9.5
+pair_modify    mix sixthpower
+parameters     class2  ../../external/pcff/pcff.frc
+typing         templates ../../external/pcff/pcff_templates.dat
+

@@ -1,8 +1,0 @@
-units          real
-special_bonds  lj 0.0 0.0 1.0  coul 0.0 0.0 1.0
-pair_style     lj/class2/coul/long  12.0  12.0
-pair_modify    mix sixthpower
-parameters     class2  ../../external/iff/pcff_interface_v1_5.frc
-typing         templates ../../external/iff/pcff_interface_v1_5_templates.dat
-electrostatics pppm
-accuracy       1e-5

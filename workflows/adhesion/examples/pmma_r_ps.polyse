@@ -1,0 +1,12 @@
+polyse-build 1
+# PMMA-random-PS: every chain has exactly 140 MMA and 60 styrene units in random order
+# (random-exact; DP 200), 20 chains (~60,000 atoms). The order is set by sequence_seed.
+name          pmma_r_ps
+sequence_seed 11
+monomer       A '*CC(C)(C(=O)OC)*'
+monomer       B '*CC(c1ccccc1)*'
+terminator    '*C'
+architecture  random-exact
+block         A 140
+block         B 60
+chains        20

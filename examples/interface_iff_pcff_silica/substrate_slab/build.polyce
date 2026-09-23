@@ -1,9 +1,0 @@
-polyce-build 1
-name          smoke_substrate
-seed          1234
-forcefield    ../../common/iff_slab.ff
-environment   silica file ../structure/silica.mol2 format mol2 replicate 2 2 1 parameterization preserve mobility fixed
-cell          80.6296 82.8640 60.0
-periodic      1 1 0
-temperature   300
-output        output substrate

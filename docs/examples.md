@@ -1,35 +1,37 @@
 # Examples
 
-Required force-field and silica data are bundled under `external/` and verified by
-the launchers; see [external data](external_data.md). All lengths are Å, energies
-kcal/mol, temperatures K and densities g/cm³ for these real-unit inputs.
+公開例はすべて Python API を直接呼び出します。
 
-| Directory below `examples/` | Model | Run |
-|---|---|---|
-| `polymer_pcff/homopolymer` | PMMA DP10, 1 chain, density 1.13 | `./run.sh` |
-| `polymer_pcff/block_copolymer` | PMMA6-b-PS6, 2 chains, density 1.110 | `./run.sh` |
-| `polymer_pcff/random_copolymer` | MMA/STY 50:50 exact, DP12, 2 chains | `./run.sh` |
-| `interface_iff_pcff_silica` | 2×2 Q3 amorphous silica + PMMA DP20 × 80 | `./run.sh`, then `./run_lammps.sh` |
+```text
+build.py
+  └─ import polyse
+       └─ polyse.build(...) / polyse.pack(...)
+            └─ native C++ engine
+                 └─ System
+```
 
-The homopolymer retains the existing PMMA DP10 reference input. The copolymer
-examples combine the existing PMMA/styrene monomer definitions, existing block
-syntax and random-exact sequence syntax in small PCFF systems. The nominal
-1.110 density is the existing PMMA/PS mixture estimate, not a measured copolymer
-material property. Random-exact is a specified composition with a seeded shuffle,
-not a kinetic polymerization model. All chains are packed by the unchanged
-builder and use the database's typing templates and parameter assignment.
+`.polyse` 設定ファイルを解釈する CLI をサブプロセス起動する構成ではありません。
+Python が所有する `System` が返り、出力前に座標、型、電荷、結合、組成、box、
+構築 report を検査できます。
 
-The interface uses a 2×2 in-plane replication of the source silica cell and scales
-the polymer amount by four to retain the original density. PolyCE constructs the
-two components independently; LAMMPS relaxes the periodic polymer, unwraps its
-molecules before removing z periodicity, merges by computed type offsets, relaxes
-the interface and samples cross-interface interaction energy. IFF uses a single
-PCFF-compatible class-II database for both components, with sixth-power mixing,
-PPPM and the slab correction. No new force-field fit or interface mixing rule is
-introduced.
+全例の一覧、元の開発例との対応、API の機能差または CLI 固有の目的により移植していない例は
+[examples/README.md](../examples/README.md) に記載しています。
 
-The default LAMMPS smoke run reduces step counts, minimizer iteration budgets
-and output sampling intervals. It checks execution and finite energies; it is
-not an equilibrium or adhesion free-energy measurement. The full mode preserves
-the existing input's full simulation/minimization defaults and was not run to
-completion as part of the binary smoke validation.
+単一成分では `polyse.build()`、複数成分・コポリマー・スラブでは
+`polyse.pack()` を使います。`counts` と組成比＋目標サイズは排他的です。
+
+```python
+import polyse
+
+ps = polyse.Polymer("*C(c1ccccc1)C*", dp=20, name="ps")
+pmma = polyse.Polymer("*CC(C)(C(=O)OC)*", dp=20, name="pmma")
+
+system = polyse.pack(
+    [ps, pmma],
+    total_molecules=20,
+    mole_fractions={"ps": 0.5, "pmma": 0.5},
+    forcefield="pcff",
+    density=1.0,
+)
+print(system.composition)
+```

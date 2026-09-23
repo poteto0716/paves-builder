@@ -1,6 +1,6 @@
 # Third-party materials
 
-PolyCE binaries, documentation, examples and runtime scripts are distributed under
+polyse binaries, documentation, examples and runtime scripts are distributed under
 [LICENSE](LICENSE). This does not grant rights to third-party materials.
 
 ## Compiler and system runtime
@@ -33,7 +33,7 @@ The IFF 1.5 archive and the authors' public GitHub repository contain parameters
 and surface models, but the inspected material does not state an explicit
 redistribution license. Citation requests are recorded; they are not treated as
 a change to the files' terms. The bundled files remain third-party materials and
-are not licensed under the PolyCE Binary Software License.
+are not licensed under the polyse Binary Software License.
 
 [External data](docs/external_data.md) gives official sources, exact filenames,
 installation locations, hashes and citations. The installer can restore the
@@ -45,4 +45,4 @@ excluded from version control.
 Build configuration, dependencies, the included runtime helpers and data provenance
 were inspected. No license is inferred from a file merely being present in the
 development installation. No source-available or open-source license is granted
-to the PolyCE core. The copyright holder supplied the license text in this release.
+to the polyse core. The copyright holder supplied the license text in this release.

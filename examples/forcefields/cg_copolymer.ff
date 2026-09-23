@@ -1,0 +1,58 @@
+# Small coarse-grained copolymer model used to exercise junction typing.
+units          real
+special_bonds  lj 0.0 0.0 1.0  coul 0.0 0.0 0.0
+pair_style     wca
+pair_modify    mix geometric
+dielectric     1.0
+
+atom     Aa    1.0    0.0     1.00   1.0
+atom     Bb    1.2    0.0     1.10   1.0
+atom     Cc    1.4    0.0     1.20   1.0
+atom     Tt    1.0    0.0     1.00   1.0
+
+type     Aa    Aa       *         *
+type     Bb    Bb       *         *
+type     Cc    Cc       *         *
+type     Tt    Tt       *         *
+
+bond      harmonic  Aa  Aa    30.0   1.00
+bond      harmonic  Bb  Bb    30.0   1.10
+bond      harmonic  Cc  Cc    30.0   1.20
+bond      harmonic  Aa  Bb    30.0   1.05
+bond      harmonic  Bb  Cc    30.0   1.15
+bond      harmonic  Aa  Cc    30.0   1.10
+bond      harmonic  Tt  Aa    30.0   1.00
+bond      harmonic  Tt  Bb    30.0   1.05
+bond      harmonic  Tt  Cc    30.0   1.10
+
+angle     harmonic  Aa  Aa  Aa     5.0   180.0
+angle     harmonic  Aa  Aa  Bb     5.0   180.0
+angle     harmonic  Aa  Aa  Cc     5.0   180.0
+angle     harmonic  Aa  Aa  Tt     5.0   180.0
+angle     harmonic  Bb  Aa  Bb     5.0   180.0
+angle     harmonic  Bb  Aa  Cc     5.0   180.0
+angle     harmonic  Bb  Aa  Tt     5.0   180.0
+angle     harmonic  Cc  Aa  Cc     5.0   180.0
+angle     harmonic  Cc  Aa  Tt     5.0   180.0
+angle     harmonic  Tt  Aa  Tt     5.0   180.0
+angle     harmonic  Aa  Bb  Aa     5.0   180.0
+angle     harmonic  Aa  Bb  Bb     5.0   180.0
+angle     harmonic  Aa  Bb  Cc     5.0   180.0
+angle     harmonic  Aa  Bb  Tt     5.0   180.0
+angle     harmonic  Bb  Bb  Bb     5.0   180.0
+angle     harmonic  Bb  Bb  Cc     5.0   180.0
+angle     harmonic  Bb  Bb  Tt     5.0   180.0
+angle     harmonic  Cc  Bb  Cc     5.0   180.0
+angle     harmonic  Cc  Bb  Tt     5.0   180.0
+angle     harmonic  Tt  Bb  Tt     5.0   180.0
+angle     harmonic  Aa  Cc  Aa     5.0   180.0
+angle     harmonic  Aa  Cc  Bb     5.0   180.0
+angle     harmonic  Aa  Cc  Cc     5.0   180.0
+angle     harmonic  Aa  Cc  Tt     5.0   180.0
+angle     harmonic  Bb  Cc  Bb     5.0   180.0
+angle     harmonic  Bb  Cc  Cc     5.0   180.0
+angle     harmonic  Bb  Cc  Tt     5.0   180.0
+angle     harmonic  Cc  Cc  Cc     5.0   180.0
+angle     harmonic  Cc  Cc  Tt     5.0   180.0
+angle     harmonic  Tt  Cc  Tt     5.0   180.0
+

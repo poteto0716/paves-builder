@@ -1,6 +1,5 @@
 /.agents/
 /.codex/
-/external/*
 !/external/README.md
 **/output/
 /examples/interface_iff_pcff_silica/structure/

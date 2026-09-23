@@ -1,0 +1,147 @@
+<title>Silica–PMMA Smoke Run</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --ground: #EDF0EE;
+  --panel: #FBFCFB;
+  --ink: #16202A;
+  --muted: #5B6873;
+  --faint: #8C979F;
+  --line: #D3DAD7;
+  --accent: #2A6FB0;
+  --s1: #2A6FB0;
+  --s2: #B97A12;
+  --stage: #0B1114;
+  --stage-ink: #C9D3D8;
+  --focus: #2A6FB0;
+  --sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --cond: "IBM Plex Sans Condensed", "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --ground: #0E1316; --panel: #161D21; --ink: #E3E9EC; --muted: #8FA0A8; --faint: #66767E;
+    --line: #25313A; --accent: #4A90CC; --s1: #4A90CC; --s2: #B07A1C; --focus: #4A90CC;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --ground: #0E1316; --panel: #161D21; --ink: #E3E9EC; --muted: #8FA0A8; --faint: #66767E;
+  --line: #25313A; --accent: #4A90CC; --s1: #4A90CC; --s2: #B07A1C; --focus: #4A90CC;
+}
+body { background: var(--ground); color: var(--ink); font: 15px/1.55 var(--sans); }
+.wrap { max-width: 1240px; margin: 0 auto; padding-inline: 20px; padding-block: 28px 56px; display: grid; gap: 28px; }
+header { display: grid; gap: 8px; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+h1 { font: 600 clamp(26px, 4vw, 38px)/1.1 var(--cond); margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+.lede { margin: 0; max-width: 72ch; color: var(--muted); }
+.lede b { color: var(--ink); font-weight: 600; }
+.stagegrid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; align-items: start; }
+@media (max-width: 880px) { .stagegrid { grid-template-columns: 1fr; } }
+.viewer-box { position: relative; background: var(--stage); border-radius: 6px; overflow: hidden; aspect-ratio: 4 / 3; max-width: 100%; min-height: 320px; }
+#viewer { position: absolute; inset: 0; }
+.overlay { position: absolute; left: 14px; top: 12px; right: 14px; display: flex; justify-content: space-between; gap: 12px; pointer-events: none; color: var(--stage-ink); font: 500 12px/1.4 var(--mono); }
+.overlay .big { font: 600 18px/1.2 var(--cond); color: #F1F5F7; letter-spacing: .01em; }
+.hint { position: absolute; left: 14px; bottom: 10px; color: #7F929C; font: 12px/1.3 var(--mono); pointer-events: none; }
+.side { display: grid; gap: 18px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px; display: grid; gap: 10px; }
+.panel h2 { font: 600 13px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin: 0; }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.steps button { width: 100%; display: grid; grid-template-columns: 30px 1fr auto; gap: 8px; align-items: baseline; text-align: left; background: none; border: 0; border-radius: 4px; padding: 7px 8px; color: var(--ink); font: inherit; cursor: pointer; }
+.steps button:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.steps button[aria-current="true"] { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.steps .n { font: 500 12px var(--mono); color: var(--faint); }
+.steps button[aria-current="true"] .n { color: var(--accent); }
+.steps .t { font-weight: 600; font-size: 14px; }
+.steps .s { grid-column: 2 / 4; font-size: 12.5px; color: var(--muted); line-height: 1.35; }
+.steps .f { font: 12px var(--mono); color: var(--faint); }
+.frames { display: grid; grid-template-columns: auto 1fr; gap: 10px; align-items: center; }
+.frames input[type=range] { width: 100%; accent-color: var(--accent); }
+.btn { font: 500 13px var(--sans); background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 6px 12px; cursor: pointer; }
+.btn:disabled { background: var(--line); color: var(--faint); cursor: default; }
+.frame-label { font: 12px var(--mono); color: var(--muted); grid-column: 1 / 3; }
+.toggles { display: grid; gap: 6px; }
+.toggles label { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
+.toggles input { accent-color: var(--accent); }
+.swatch { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+.legend { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 12px; font-size: 13px; color: var(--muted); }
+.legend span { display: flex; gap: 6px; align-items: center; }
+:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 18px; }
+.chart { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 14px 14px 10px; display: grid; gap: 6px; position: relative; }
+.chart h3 { margin: 0; font: 600 15px/1.3 var(--sans); }
+.chart .sub { margin: 0; font-size: 12.5px; color: var(--muted); }
+.chart .keys { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--muted); }
+.chart .keys span { display: inline-flex; gap: 6px; align-items: center; }
+.chart .keys i { width: 14px; height: 2px; display: inline-block; }
+.chart svg { width: 100%; height: auto; display: block; overflow: visible; }
+.chart svg text { font: 11px var(--mono); fill: var(--muted); }
+.chart .grid line { stroke: var(--line); stroke-width: 1; }
+.chart .axis line { stroke: var(--faint); }
+.tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--panel); font: 12px/1.45 var(--mono); padding: 6px 8px; border-radius: 4px; white-space: nowrap; transform: translate(-50%, -110%); }
+.metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.metric { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; display: grid; gap: 2px; align-content: start; }
+.metric .k { font: 500 11.5px/1.3 var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--muted); }
+.metric .v { font: 600 22px/1.2 var(--cond); font-variant-numeric: tabular-nums; }
+.metric .v small { font: 500 13px var(--sans); color: var(--muted); margin-left: 3px; }
+.metric .d { font-size: 12.5px; color: var(--muted); line-height: 1.35; }
+.notes { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px 28px; font-size: 14px; color: var(--muted); }
+.notes h4 { margin: 0 0 4px; font: 600 14px var(--sans); color: var(--ink); }
+.notes p { margin: 0; max-width: 60ch; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow" id="eyebrow"></div>
+    <h1 id="title"></h1>
+    <p class="lede" id="lede"></p>
+  </header>
+
+  <section class="metrics" id="metrics" aria-label="Key numbers"></section>
+
+  <section class="stagegrid" aria-label="Structure viewer">
+    <div class="viewer-box">
+      <div id="viewer" role="img" aria-label="3D view of the current stage"></div>
+      <div class="overlay"><div><div class="big" id="ov-title"></div><div id="ov-sub"></div></div><div id="ov-frame" style="text-align:right"></div></div>
+      <div class="hint" id="hint">drag to rotate · scroll to zoom · z is up</div>
+    </div>
+    <div class="side">
+      <div class="panel">
+        <h2>Stage</h2>
+        <ol class="steps" id="steps"></ol>
+      </div>
+      <div class="panel">
+        <h2>Frames</h2>
+        <div class="frames">
+          <button class="btn" id="play" type="button">Play</button>
+          <input type="range" id="frame" min="0" max="0" value="0" aria-label="Frame">
+          <div class="frame-label" id="frame-label"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Show</h2>
+        <div class="toggles">
+          <label><input type="checkbox" id="t-silica" checked> Silica substrate</label>
+          <label><input type="checkbox" id="t-contact"> Film atoms within 3 Å of silica</label>
+          <label><input type="checkbox" id="t-pulled" checked> Pulled group (top 25 %)</label>
+          <label><input type="checkbox" id="t-fixed" checked> Fixed atoms (bottom 3 Å)</label>
+          <label><input type="checkbox" id="t-box" checked> Periodic cell</label>
+        </div>
+        <div class="legend" id="legend"></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="charts" id="charts" aria-label="Stage logs"></section>
+
+  <section class="notes" id="notes"></section>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.4.2/3Dmol-min.js"></script>
+<script type="application/json" id="data">__DATA__</script>
+__SCRIPT__

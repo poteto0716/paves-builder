@@ -1,85 +1,117 @@
-# PolyCE — Polymer Construction Engine
+# polyse
 
-**Molecular System Builder for Molecular Dynamics**
+`polyse` は、モノマーの SMILES と組成指定から分子動力学用の分子系を構築する
+Python パッケージです。Python から C++ エンジンを直接呼び出し、座標・型・電荷・
+結合・組成などを参照できる `System` を返します。正式名称と Python パッケージ名は
+どちらも **polyse** です。
 
-PolyCE constructs molecular starting structures from monomer SMILES, polymer
-sequences and imported structures. It builds and packs chains, assigns force-field
-parameters and charges, and writes topology and LAMMPS input data. This repository
-distributes an optimized Linux executable, example inputs and runtime scripts.
-PolyCE is proprietary; see [LICENSE](LICENSE) for permitted use and restrictions.
+この公開リポジトリは Linux 用バイナリ wheel、Python API の使用例、ドキュメント、
+力場データを配布します。エンジンの C/C++ ソース、ヘッダー、オブジェクト、ビルド
+ツリーは含みません。利用条件は [LICENSE](LICENSE) を確認してください。
 
-## Supported platform
+## 対応環境とインストール
 
-Tested on **Ubuntu 24.04.3 LTS, Linux x86_64** with Python 3.12.
-The executable needs `libc6`, `libstdc++6` and `libgcc-s1` (glibc >= 2.38,
-GLIBCXX >= 3.4.31). Ubuntu 22.04 is not supported by this build. No compiler,
-CMake, GPU, CUDA or development checkout is required.
-
-LAMMPS is a separate dependency for simulation and interface merging/analysis.
-The interface example needs CLASS2, KSPACE, MOLECULE and EXTRA-FIX functionality;
-see its [README](examples/interface_iff_pcff_silica/README.md).
-
-## Installation
-
-Clone this repository using its GitHub **Code → HTTPS** URL:
+収録 wheel の検証環境は **Ubuntu 24.04 x86_64 / CPython 3.13** です。
+Python ABI とプラットフォームが一致しない環境にはインストールできません。
 
 ```bash
-git clone <repository-url> polyce-builder
-cd polyce-builder
-chmod +x bin/polyce-build
-sudo apt-get install libc6 libstdc++6 libgcc-s1 python3
-bin/polyce-build --help
+git clone <repository-url> polyse
+cd polyse
+python3 -m pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+python3 -c 'import polyse; print(polyse.__version__)'
 sha256sum -c SHA256SUMS
 ```
 
-The PCFF/IFF parameter databases and IFF silica model used by the examples are
-bundled under `external/`, so examples run offline immediately after clone. Their
-sources, pinned checksums and optional restore procedure are documented in
-[external data](docs/external_data.md). These third-party materials retain their
-own terms; their inclusion does not place them under the PolyCE license.
+実行時には Ubuntu 24.04 の `libc6`、`libstdc++6`、`libgcc-s1` が必要です。
+コンパイラ、CMake、開発用ソースは不要です。
 
-## Quick start
+## 密着ワークフロー（高分子 / シリカ）
 
-From the repository root:
-
-```bash
-cd examples/polymer_pcff/homopolymer
-./run.sh
-```
-
-This builds a packed PMMA DP10 chain and prints `PASS` after basic data checks.
-LAMMPS data is written to **`output/pmma10.data`**; the accompanying
-`output/pmma10.in.styles` selects the styles and reads the data file.
-The example is a small construction demonstration, not an equilibrated material.
-
-## Examples
-
-| Example | What it demonstrates |
-|---|---|
-| [PCFF homopolymer](examples/polymer_pcff/homopolymer/README.md) | PMMA, 10 repeat units, one chain |
-| [PCFF block copolymer](examples/polymer_pcff/block_copolymer/README.md) | PMMA6-b-PS6, two chains |
-| [PCFF random copolymer](examples/polymer_pcff/random_copolymer/README.md) | Six MMA and six styrene units per chain, shuffled reproducibly |
-| [iFF-PCFF silica/polymer interface](examples/interface_iff_pcff_silica/README.md) | Imported silica + independently packed PMMA → LAMMPS merge → relaxation |
-| [Surface/interface interaction analysis](examples/interface_iff_pcff_silica/README.md#surfaceinterface-interaction-analysis) | Pair + reciprocal group/group interaction energy and area normalization |
-
-Each directory supplies `run.sh`, inputs and exact commands. The interface
-`run.sh` builds the two components; `run_lammps.sh` performs the LAMMPS stages.
-
-## CLI reference and documentation
+任意の高分子について、バルク → 表面 → シリカ上への加圧密着 → 緩和 → 界面エネルギー →
+引張までを OpenMM で一続きに実行し、LAMMPS 形式でも出力するワークフローを
+[`workflows/adhesion/`](workflows/adhesion/README.md) に収録しています。
 
 ```bash
-bin/polyce-build --help
-bin/polyce-build -h
-bin/polyce-build path/to/build.polyce
-bin/polyce-build path/to/build.polyce chains=2 seed=1234
+conda env create -f workflows/adhesion/environment.yml && conda activate polyse-adhesion
+pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+cd workflows/adhesion
+python adhesion.py new pmma --monomer '*CC(C)(C(=O)OC)*' --dp 200 --chains 20
+python adhesion.py run projects/pmma            # 中断しても同じコマンドで続きから
 ```
 
-See [getting started](docs/getting_started.md), [examples](docs/examples.md),
-[CLI reference](docs/cli_reference.md), [validation](docs/validation.md) and
-[third-party notices](THIRD_PARTY_LICENSES.md). Only `polyce-build` is distributed;
-internal fixture and benchmark executables are excluded.
+## 最初の分子系
 
-The repository contains no PolyCE C/C++ source, object files, build tree or debug
-symbols. The small Python and shell files are necessary example execution,
-external-data preparation and output checking scripts. They are covered by the
-supplied binary software license along with the documentation and examples.
+```python
+import polyse
+
+system = polyse.build(
+    monomer="*CC(C)(C(=O)OC)*",  # PMMA
+    forcefield="pcff",
+    chains=20,
+    dp=100,
+    density=1.18,
+    temperature=413,
+)
+
+print(system.n_atoms)
+system.write_lammps("pmma_system")
+```
+
+`dp` は1鎖の繰り返し単位数、`chains` は鎖数です。`write_lammps()` は指定
+ディレクトリへ `system.data`、`system.in.styles`、`system.identity` を出力します。
+
+## オブジェクトを組み合わせて pack する
+
+`Polymer`、`Copolymer`、`Solvent`、`Slab` を組み合わせられます。
+
+```python
+import polyse
+
+pmma = polyse.Polymer("*CC(C)(C(=O)OC)*", dp=20, name="pmma")
+toluene = polyse.Solvent("Cc1ccccc1", name="toluene")
+
+# 成分ごとの個数を指定
+system = polyse.pack(
+    [pmma, toluene],
+    counts={"pmma": 4, "toluene": 100},
+    forcefield="pcff",
+    density=1.0,
+)
+
+# 全原子数の目標と weight 比を指定
+system = polyse.pack(
+    [pmma, toluene],
+    total_atoms=10_000,
+    weight_fractions={"pmma": 0.7, "toluene": 0.3},
+    forcefield="pcff",
+    density=1.0,
+)
+
+print(system.composition)  # 実現した個数、mol比、weight比
+```
+
+`System` から `positions`、`atom_types`、`masses`、`charges`、`bonds`、
+`angles`、`dihedrals`、`impropers`、`identity`、`box`、`composition`、
+`report` を参照できます。詳しくは [Python API](docs/python_api.md) を参照してください。
+
+## examples
+
+[examples](examples/README.md) は `projects/polyse/examples` の検証例を Python API
+へ移植したものです。収録した実行入力はすべて `.py` で、独自入力ファイルや
+CLI サブプロセスを使いません。
+
+```bash
+python examples/01_pcff_polystyrene/pmma_dp10/build.py
+```
+
+出力は各例の `output/` に生成され、Git 管理対象外です。力場の出典と収録データは
+[外部データ](docs/external_data.md)、検証範囲は
+[バイナリ検証](docs/validation.md) を参照してください。
+
+## バイナリ配布と秘匿性
+
+wheel 内の計算エンジンと高水準 API 実装は strip 済みネイティブ拡張です。公開側には
+元の実装ソースを収録していません。一方で、利用者のコンピューターで動くバイナリの
+解析を技術だけで完全に不可能にすることはできません。シンボル・デバッグ情報・私有
+パスを除去し、[LICENSE](LICENSE) で逆コンパイル、逆アセンブル、実装復元を禁止する
+構成です。詳細は [配布方針](docs/binary_distribution.md) を参照してください。

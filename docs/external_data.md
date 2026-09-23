@@ -1,10 +1,10 @@
-# External data setup
+# External data
 
-The force-field databases and silica coordinates are **not included** in this
-repository. Public availability does not establish redistribution permission.
-Obtain the files directly from their owners, check the terms applicable to your
-use, then run the commands below from the repository root. No EMC executable is
-used or linked by PolyCE.
+このリポジトリの `external/` には examples を再現するための固定版 PCFF/IFF データと
+silica 座標を収録しています。これらは polyse の所有物ではなく、polyse の
+[LICENSE](../LICENSE) は適用されません。利用・再配布条件は各権利者の条件を確認して
+ください。以下の手順は、収録コピーを公式配布物から checksum 検証付きで復元する
+ためのものです。EMC executable は polyse に使用・リンクしていません。
 
 ## PCFF polymer examples
 
@@ -25,14 +25,14 @@ python3 scripts/external_data.py pcff /path/to/v9.4.4/field/cff/pcff
 ```
 
 The official archive was downloaded during package validation and both database
-files matched the pinned hashes. This copies only the two checksum-verified files into `external/pcff/` for your
-local use. The absolute path above is your one-time installation input; example
-configurations use only relative paths within this repository.
+files matched the pinned hashes. This copies only the two checksum-verified files into `external/pcff/`.
+The absolute path above is your one-time installation input; example configurations
+use only relative paths within this repository.
 
 The inspected EMC installation includes GPLv3 license text, while its SourceForge
 project metadata labels the project MIT. Neither observation by itself establishes
-rights to redistribute the separately sourced historical PCFF database. No PCFF
-parameters or templates are included in this release, and no license is inferred.
+rights to redistribute the separately sourced historical PCFF database.収録されていること自体
+からライセンスを推定したり、polyse が権利を付与したりするものではありません。
 
 ## IFF silica/polymer interface
 
@@ -63,11 +63,8 @@ Only these four archive members are installed under `external/iff/`:
 | `MODEL_DATABASE/SILICA/silica_Q3_amorph_4_7OH_0pct_ion.car` | `silica.car` |
 | `MODEL_DATABASE/SILICA/silica_Q3_amorph_4_7OH_0pct_ion.mdf` | `silica.mdf` |
 
-The example converts the CAR/MDF pair to MOL2 locally. It wraps x/y and shifts z
-by 2 Å while retaining the supplied types, charges and bond graph. Its conversion
-report checks that minimum-image bond lengths have not changed. Generated MOL2,
-LAMMPS files containing these parameters, and external data are excluded from
-version control; they are not redistributed with the package.
+必要に応じて CAR/MDF から生成した MOL2 や LAMMPS 出力は Git 管理対象外です。
+元の PCFF/IFF と CAR/MDF の固定コピーだけを `external/` に収録しています。
 
 ## Verification and citations
 
@@ -85,6 +82,5 @@ For the silica models cite F. S. Emami et al., *Chem. Mater.* 2014, 26, 2647,
 [DOI](https://doi.org/10.1021/cm500365c).
 Consult the PCFF database's reference records for the original parameter sources.
 
-The external-data directory must remain local. `.gitignore` is a convenience,
-not a redistribution license; do not force-add these files or package them in a
-release archive.
+第三者データは polyse wheel 自体には格納していません。`external/` のファイルを
+別の成果物へ再梱包する場合も、各権利者の条件を別途確認してください。

@@ -1,0 +1,9 @@
+polyse-build 1
+# PMMA-alt-PS: A-B-A-B..., DP 200, 20 chains (~62,000 atoms).
+name          pmma_alt_ps
+monomer       A '*CC(C)(C(=O)OC)*'
+monomer       B '*CC(c1ccccc1)*'
+terminator    '*C'
+architecture  alternating
+degree        200
+chains        20

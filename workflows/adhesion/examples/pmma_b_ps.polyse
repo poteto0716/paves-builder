@@ -1,0 +1,11 @@
+polyse-build 1
+# PMMA-block-PS diblock: every chain is A100-B100 (DP 200), 20 chains (~62,000 atoms).
+# Blocks may also be fractions of the chain: `block A fraction 0.5`.
+name          pmma_b_ps
+monomer       A '*CC(C)(C(=O)OC)*'
+monomer       B '*CC(c1ccccc1)*'
+terminator    '*C'
+architecture  blocks
+block         A 100
+block         B 100
+chains        20

@@ -1,0 +1,19 @@
+# Runtime environment for the adhesion workflow.
+#   conda env create -f workflows/adhesion/environment.yml
+#   conda activate polyse-adhesion
+#   pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+name: polyse-adhesion
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13        # the polyse wheel is built for CPython 3.13
+  - openmm>=8.2        # CUDA / OpenCL / CPU platforms
+  # OpenMM's CUDA build must not be newer than what the GPU driver supports
+  # (`nvidia-smi` shows it). CUDA 12 builds run on every driver from 12.x on;
+  # a newer toolkit on an older driver fails with CUDA_ERROR_UNSUPPORTED_PTX_VERSION,
+  # and adhesion.py then falls back to CPU. Raise this pin only with the driver.
+  - cuda-version>=12,<13
+  - numpy
+  - scipy
+  - mdtraj             # only for `adhesion.py report`
+  - pip
