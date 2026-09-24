@@ -138,6 +138,23 @@ OVITO で `final.data` を LAMMPS data（atom style `full`）として開き、*
 結合を保ったまま座標だけがフレームごとに変わります。MDTraj の `save_lammpstrj` の出力は
 全原子を type 1 と書くため、Load trajectory でタイプが上書きされて色分けできなくなります。
 
+#### ブラウザ（Jupyter）で OVITO を使う
+
+`ovito_view.ipynb` は、上と同じパイプライン（`final.data` ＋ Load trajectory）を Jupyter の
+中の OVITO ビューポートで表示します。マウスで回転・ズームでき、フレームはスライダーで選びます。
+
+```bash
+pip install ovito jupyterlab ipywidgets        # ワークフローの環境に、初回のみ
+cd workflows/adhesion
+jupyter lab                                    # 表示された URL をブラウザで開く
+```
+
+セル 1 の `RUN_DIR` を `projects/<名前>/runs/09_pull`（または `05_compress`）にして、
+全セルを実行します。変換（`dcd_to_ovito.py`）が必要なら自動で行います。原子は質量から
+元素の色と大きさで描き（シリカは淡色）、09 では引張群を青で示します。セル 3 に OVITO の
+モディファイア（例として Slice をコメントで記載）を足して、セル 3 と 4 を実行し直すと
+反映されます。
+
 ## LAMMPS ⇔ OpenMM 変換
 
 ```bash
