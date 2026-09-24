@@ -119,12 +119,24 @@ E_int = E(全系) − E(高分子) − E(シリカ)、 γ = E_int / (Lx·Ly)
 | `final.data`, `in.styles` | LAMMPS（`include in.styles` の後に fix と run を追加）。画像フラグ付き、速度込み |
 | `final.pdb` | 表示用 |
 | `log.csv`, `summary.json` | 経過と結果 |
-| `05_compress/trajectory.dcd`, `09_pull/trajectory.dcd` + `topology.pdb` | trajectory（VMD, OVITO, MDTraj） |
+| `05_compress/trajectory.dcd`, `09_pull/trajectory.dcd` + `topology.pdb` | trajectory（VMD, MDTraj。OVITO は下記） |
 | `09_pull/pull_force.csv` | `pull.force_every` step ごと（既定 100。基準点は毎 step 動かす）の基準点・重心・伸び・力（kcal/mol/Å と nN、+ は上向き） |
 | `07_relax/fixed_atoms.lammps_ids.txt` | 固定原子の LAMMPS id（LAMMPS では `fix setforce 0 0 0` で固定） |
 
 OpenMM の力場は `runs/01_build/polymer.openmm_system.xml`（高分子のみ）と
 `runs/04_assemble/out/interface.openmm_system.xml`（界面系）です。
+
+### OVITO で見る
+
+```bash
+python dcd_to_ovito.py projects/<名前>/runs/09_pull      # compress なら runs/05_compress
+```
+
+`trajectory_ovito.dump`（`id x y z` のみ、セルは `final.data` と同じ 0〜L）ができます。
+OVITO で `final.data` を LAMMPS data（atom style `full`）として開き、**Load trajectory**
+モディファイアで `trajectory_ovito.dump` を読み込むと、`final.data` の原子タイプ・電荷・
+結合を保ったまま座標だけがフレームごとに変わります。MDTraj の `save_lammpstrj` の出力は
+全原子を type 1 と書くため、Load trajectory でタイプが上書きされて色分けできなくなります。
 
 ## LAMMPS ⇔ OpenMM 変換
 
