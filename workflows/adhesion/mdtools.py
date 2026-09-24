@@ -142,6 +142,38 @@ def limited_langevin(T_K, friction_per_ps, dt_fs, max_step_A):
     return ci
 
 
+def masked_langevin(T_K, friction_per_ps, dt_fs, thermostatted):
+    """LangevinMiddleIntegrator, with the thermostat applied only to chosen degrees of freedom.
+
+    `thermostatted` is an (N, 3) array of 0/1: a 1 gets friction and noise, a 0
+    is integrated as NVE (it exchanges energy with the others through the
+    forces only). Pulling uses it to leave z free on the polymer, as LAMMPS
+    `compute temp/partial 1 1 0` does: plain Langevin damps every velocity
+    towards 0 in the lab frame, so a film dragged at v feels an extra
+    -M*gamma*v that the spring has to supply. Same step sequence as OpenMM's
+    LangevinMiddleIntegrator (constraints included); fixed atoms (mass 0) stay put.
+    """
+    dt = dt_fs * 1e-3                                   # ps
+    a = math.exp(-friction_per_ps * dt)
+    ci = mm.CustomIntegrator(dt)
+    ci.addGlobalVariable('a', a)
+    ci.addGlobalVariable('b', math.sqrt(1 - a * a))
+    ci.addGlobalVariable('kT', KB_KJ * T_K)
+    ci.addPerDofVariable('w', 0)
+    ci.addPerDofVariable('x1', 0)
+    ci.setPerDofVariableByName('w', [mm.Vec3(*map(float, r)) for r in np.asarray(thermostatted)])
+    ci.addUpdateContextState()
+    ci.addComputePerDof('v', 'select(m, v + dt*f/m, 0)')
+    ci.addConstrainVelocities()
+    ci.addComputePerDof('x', 'x + 0.5*dt*v')
+    ci.addComputePerDof('v', 'select(m, w*(a*v + b*sqrt(kT/m)*gaussian) + (1-w)*v, 0)')
+    ci.addComputePerDof('x', 'x + 0.5*dt*v')
+    ci.addComputePerDof('x1', 'x')
+    ci.addConstrainPositions()
+    ci.addComputePerDof('v', 'v + (x-x1)/dt')
+    return ci
+
+
 def prerelax(system_xml, positions_A, box_A, *, fixed=(), steps=20000, T_K=300.0, friction_per_ps=10.0,
              dt_fs=1.0, max_step_A=0.1, platform='auto', precision='mixed', report=None):
     """Relax a strained structure with limited_langevin; returns (positions_A, [PE per 4000 steps]).

@@ -34,6 +34,12 @@ WORKFLOW = Path(__file__).resolve().parent
 BUILDER = WORKFLOW.parents[1]
 
 
+# pcff-iff-mod: torsions across an angle of theta0 >= 150 deg (Si-O-Si) are switched
+# off between 175 and 180 deg, where they are singular; otherwise identical.
+FORCEFIELDS = {'pcff-iff': '@builder/examples/forcefields/pcff_iff_long_bulk.ff',
+               'pcff-iff-mod': '@builder/examples/forcefields/pcff_iff_long_bulk_mod.ff'}
+
+
 def resolve(value, project):
     """@builder/…, @workflow/… and @project/… paths, made absolute."""
     if not isinstance(value, str):
@@ -87,6 +93,7 @@ def cmd_new(a):
             sys.exit('give --monomer, --dp and --chains, or --polyse FILE (copolymers, blocks, random, ...)')
         y.update({'monomer': a.monomer, 'terminator': a.terminator, 'dp': a.dp, 'chains': a.chains})
     cfg['assemble']['supercell'] = [a.supercell[0], a.supercell[1], 1]
+    cfg['forcefield'] = FORCEFIELDS[a.forcefield]
     if a.test:
         cfg['step_scale'] = 0.01
     # polyse's own parser checks the build input now, not hours into a run.
@@ -224,6 +231,9 @@ def main():
     n.add_argument('--supercell', type=int, nargs=2, default=[3, 2], metavar=('NX', 'NY'),
                    help='silica supercell in x and y (default 3 2 = 120.9 x 82.9 A)')
     n.add_argument('--density', type=float, default=1.0, help='build density, g/cm3 (default 1.0)')
+    n.add_argument('--forcefield', choices=list(FORCEFIELDS), default='pcff-iff-mod',
+                   help='pcff-iff-mod (default): torsions across a near-linear Si-O-Si switched off, '
+                        'stable at 1 fs with SHAKE; pcff-iff: the published model unchanged')
     n.add_argument('--seed', type=int, default=2026)
     n.add_argument('--dir', help='parent directory for the project (default ./projects)')
     n.add_argument('--test', action='store_true', help='every stage at 1/100 of its steps, to check a setup quickly')

@@ -1,6 +1,6 @@
 {
  "_comment": "Protocol defaults for adhesion.py. A project copies these into its project.json; edit the copy. Keys starting default_ were chosen for the reference case, not requested.",
- "forcefield": "@builder/examples/forcefields/pcff_iff_long_bulk.ff",
+ "forcefield": "@builder/examples/forcefields/pcff_iff_long_bulk_mod.ff",
  "silica_mol2": "@workflow/data/silica_Q3_amorph_4_7OH.mol2",
  "platform": "auto",
  "precision": "mixed",
@@ -111,6 +111,7 @@
   "k_kcal_A2": 100.0,
   "speed_m_s": 10.0,
   "top_fraction": 0.25,
-  "dcd_every": 5000
+  "dcd_every": 5000,
+  "default_thermostat": "xy"
  }
 }

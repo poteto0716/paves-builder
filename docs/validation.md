@@ -22,5 +22,5 @@ strip やパス検査は秘匿性を完全に保証するものではありま�
 最後に自動実行し、いずれかの条件を満たさなければ失敗します。
 
 ```bash
-scripts/audit_binary_wheel.sh dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+scripts/audit_binary_wheel.sh dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
 ```

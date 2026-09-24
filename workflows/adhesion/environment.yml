@@ -1,7 +1,7 @@
 # Runtime environment for the adhesion workflow.
 #   conda env create -f workflows/adhesion/environment.yml
 #   conda activate polyse-adhesion
-#   pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+#   pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
 name: polyse-adhesion
 channels:
   - conda-forge

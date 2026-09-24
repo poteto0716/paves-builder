@@ -17,7 +17,7 @@ Python ABI とプラットフォームが一致しない環境にはインスト
 ```bash
 git clone <repository-url> polyse
 cd polyse
-python3 -m pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+python3 -m pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
 python3 -c 'import polyse; print(polyse.__version__)'
 sha256sum -c SHA256SUMS
 ```
@@ -33,7 +33,7 @@ sha256sum -c SHA256SUMS
 
 ```bash
 conda env create -f workflows/adhesion/environment.yml && conda activate polyse-adhesion
-pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
 cd workflows/adhesion
 python adhesion.py new pmma --monomer '*CC(C)(C(=O)OC)*' --dp 200 --chains 20
 python adhesion.py run projects/pmma            # 中断しても同じコマンドで続きから

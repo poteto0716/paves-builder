@@ -667,7 +667,14 @@ def stage_pull(cfg, runs):
     spring.addGlobalParameter('zref', z0 * 0.1)
     spring.setForceGroup(30)
     system.addForce(spring)
-    integ = integrator(c['temperature'], c['dt_fs'], cfg['default_friction_per_ps'])
+    # 'xy': no friction on the polymer's z velocity (LAMMPS temp/partial 1 1 0).
+    # With 'all', Langevin drags the whole film towards v = 0 and, once it has
+    # come off, the spring still reads M_polymer * gamma * v (~7 nN for PMMA
+    # DP 200 x 20 at 10 m/s and 1/ps).
+    mask = np.ones((system.getNumParticles(), 3))
+    if c.get('default_thermostat', 'xy') == 'xy':
+        mask[n_si:, 2] = 0.0
+    integ = T.masked_langevin(c['temperature'], cfg['default_friction_per_ps'], c['dt_fs'], mask)
     ctx = context_for(cfg, system, integ)
     ctx.setState(start)
     n = s.steps(c['steps'])

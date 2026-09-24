@@ -5,7 +5,7 @@
 Ubuntu 24.04 x86_64 と CPython 3.13 を使用します。リポジトリのルートで:
 
 ```bash
-python3 -m pip install dist/polyse-0.2.0-cp313-cp313-linux_x86_64.whl
+python3 -m pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
 python3 - <<'PY'
 import polyse
 print(polyse.__version__)

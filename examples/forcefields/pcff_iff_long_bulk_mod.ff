@@ -1,0 +1,17 @@
+# Modified PCFF-IFF v1.5 with periodic PPPM (no slab correction).
+#
+# Identical to pcff_iff_long_bulk.ff except for one change in functional form:
+# torsions (and their phi-dependent cross terms) across an angle whose theta0
+# is >= 150 deg -- in PCFF-IFF, Si-O-Si -- are switched off smoothly as that
+# angle goes from 175 to 180 deg, where a dihedral is undefined and its force
+# diverges as 1/sin(theta). No coefficient changes. OpenMM export only; the
+# LAMMPS files keep the unmodified dihedral_style class2.
+units          real
+special_bonds  lj 0.0 0.0 1.0  coul 0.0 0.0 1.0
+pair_style     lj/class2/coul/long  12.0  12.0
+pair_modify    mix sixthpower
+parameters     class2  ../../external/iff/pcff_interface_v1_5.frc
+typing         templates ../../external/iff/pcff_interface_v1_5_templates.dat
+electrostatics pppm
+accuracy       1e-5
+linear_torsion_damping 175 150

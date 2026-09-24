@@ -12,7 +12,7 @@ from setuptools.command.build_py import build_py
 
 
 root = Path(__file__).resolve().parent
-version = os.environ.get("POLYSE_VERSION", "0.2.0")
+version = os.environ.get("POLYSE_VERSION", "0.2.1")
 
 
 class StrippedBuildExt(build_ext):

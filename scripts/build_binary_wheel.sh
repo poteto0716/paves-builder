@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SOURCE=${POLYSE_SOURCE:-$ROOT/../polyse}
-VERSION=${POLYSE_VERSION:-0.2.0}
+VERSION=${POLYSE_VERSION:-0.2.1}
 PYTHON=${PYTHON:-python3}
 STAGE=$(mktemp -d)
 trap 'rm -rf -- "$STAGE"' EXIT
