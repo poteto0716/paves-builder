@@ -111,6 +111,7 @@
   "k_kcal_A2": 100.0,
   "speed_m_s": 10.0,
   "top_fraction": 0.25,
+  "force_every": 100,
   "dcd_every": 5000,
   "default_thermostat": "xy"
  }

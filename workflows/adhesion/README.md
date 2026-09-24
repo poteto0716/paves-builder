@@ -78,7 +78,7 @@ python adhesion.py run projects/pmma --only interface   # 1 段階だけ
 | 06 | cool | 壁を解除、550→300 K 20万 step | 0.25 fs / なし |
 | 07 | relax | 300 K 50万 step | 0.25 fs / なし |
 | 08 | interface | 300 K 1万 step、1000 step ごとに界面エネルギーを評価して平均 | 0.25 fs / なし |
-| 09 | pull | 上位 25%（正規化 z ≥ 0.75）原子群の重心をバネ 100 kcal/mol/Å² で 10 m/s（0.1 Å/ps）引張、150万 step。力を毎 step 出力、trajectory 保存。高分子の z 方向には熱浴をかけない（下記） | 0.25 fs / なし |
+| 09 | pull | 上位 25%（正規化 z ≥ 0.75）原子群の重心をバネ 100 kcal/mol/Å² で 10 m/s（0.1 Å/ps）引張、150万 step。力を 100 step ごとに出力（`pull.force_every`）、trajectory 保存。高分子の z 方向には熱浴をかけない（下記） | 0.25 fs / なし |
 
 ### 引張（09）の熱浴
 
@@ -120,7 +120,7 @@ E_int = E(全系) − E(高分子) − E(シリカ)、 γ = E_int / (Lx·Ly)
 | `final.pdb` | 表示用 |
 | `log.csv`, `summary.json` | 経過と結果 |
 | `05_compress/trajectory.dcd`, `09_pull/trajectory.dcd` + `topology.pdb` | trajectory（VMD, OVITO, MDTraj） |
-| `09_pull/pull_force.csv` | 毎 step の基準点・重心・伸び・力（kcal/mol/Å と nN、+ は上向き） |
+| `09_pull/pull_force.csv` | `pull.force_every` step ごと（既定 100。基準点は毎 step 動かす）の基準点・重心・伸び・力（kcal/mol/Å と nN、+ は上向き） |
 | `07_relax/fixed_atoms.lammps_ids.txt` | 固定原子の LAMMPS id（LAMMPS では `fix setforce 0 0 0` で固定） |
 
 OpenMM の力場は `runs/01_build/polymer.openmm_system.xml`（高分子のみ）と

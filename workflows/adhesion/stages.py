@@ -688,13 +688,15 @@ def stage_pull(cfg, runs):
     fh.write('step,time_ps,z_ref_A,z_com_A,extension_A,force_kcal_mol_A,force_nN\n')
     kcal_A_to_nN = T.KCAL * 1000 / AVOGADRO / 1e-10 * 1e9
     rows = []
+    every = max(1, int(c.get('force_every', 100)))           # a row every `every` steps (and the last)
     for k in range(n + 1):
-        zref = z0 * 0.1 + v_nm_fs * dt * k
+        zref = z0 * 0.1 + v_nm_fs * dt * k                   # the reference still moves every step
         ctx.setParameter('zref', zref)
-        zc = spring.getCollectiveVariableValues(ctx)[0]
-        f = c['k_kcal_A2'] * (zref - zc) * 10                  # kcal/mol/A, + = upward on the polymer
-        rows.append(f'{k},{k * dt / 1000:.6f},{zref * 10:.6f},{zc * 10:.6f},{(zc * 10 - z0):.6f},{f:.6f},'
-                    f'{f * kcal_A_to_nN:.6f}\n')
+        if k % every == 0 or k == n:
+            zc = spring.getCollectiveVariableValues(ctx)[0]
+            f = c['k_kcal_A2'] * (zref - zc) * 10              # kcal/mol/A, + = upward on the polymer
+            rows.append(f'{k},{k * dt / 1000:.6f},{zref * 10:.6f},{zc * 10:.6f},{(zc * 10 - z0):.6f},{f:.6f},'
+                        f'{f * kcal_A_to_nN:.6f}\n')
         if len(rows) >= 10000:
             fh.writelines(rows)
             rows.clear()

@@ -200,7 +200,7 @@ def main(argv=None):
         pf = rows(runs / '09_pull/pull_force.csv')
         step = max(1, len(pf) // 1500)
         pf = pf[::step]
-        charts.append({'title': 'Pull force on the film', 'sub': f'09 · spring 100 kcal/mol/Å², + = upward (every {step}th step)',
+        charts.append({'title': 'Pull force on the film', 'sub': f'09 · spring 100 kcal/mol/Å², + = upward (every {step}th row)',
                        'x': 'time (ps)', 'unit': 'nN', 'xd': 1, 'yd': 3,
                        'series': [{'name': 'force', 'short': 'force', 'color': '--s1',
                                    'pts': [[float(r['time_ps']), float(r['force_nN'])] for r in pf]}]})
@@ -211,13 +211,14 @@ def main(argv=None):
         st = T.load_xml(runs / '09_pull/state.xml')
         P = I.metrics(T.positions_A(st), T.box_A(st))
         pf_all = np.loadtxt(runs / '09_pull/pull_force.csv', delimiter=',', skiprows=1)
-        w = min(2000, len(pf_all))
+        dt_row = float(pf_all[1, 1] - pf_all[0, 1]) if len(pf_all) > 1 else 0.00025   # ps between rows
+        w = max(1, min(int(round(0.5 / dt_row)), len(pf_all)))                       # a 0.5-ps window
         smooth_f = np.convolve(pf_all[:, 6], np.ones(w) / w, mode='same')
         k = int(np.argmax(smooth_f[w // 2:len(smooth_f) - w // 2]) + w // 2) if len(pf_all) > w else int(np.argmax(pf_all[:, 6]))
         work = float(np.trapezoid(pf_all[:, 5], pf_all[:, 2]))
         area = float(box[0] * box[1])
         metrics.append({'k': 'Peak pull force', 'v': f'{smooth_f[k]:.1f}', 'u': 'nN',
-                        'd': f'{w * 0.25 / 1000:.1f}-ps mean, at {pf_all[k, 1]:.0f} ps (reference +{pf_all[k, 2] - pf_all[0, 2]:.1f} Å); '
+                        'd': f'{w * dt_row:.1f}-ps mean, at {pf_all[k, 1]:.0f} ps (reference +{pf_all[k, 2] - pf_all[0, 2]:.1f} Å); '
                              f'spring work {work / area * 694.77:.0f} mJ/m²'})
         metrics.append({'k': 'Contact after pulling', 'v': f"{P['c3']:,}", 'u': f"of {M['c3']:,}",
                         'd': 'film atoms within 3 Å of silica, end of pull vs before; a remaining layer means failure inside the film'})
