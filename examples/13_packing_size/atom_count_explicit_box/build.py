@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-system = polyse.build(
+system = polypaves.build(
     monomer="*CC*",
     dp=10,
     total_atoms=700,

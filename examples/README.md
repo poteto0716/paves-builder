@@ -1,8 +1,8 @@
 # Python API examples
 
-隣接する開発リポジトリ `projects/polyse/examples` の検証入力を、公開 Python API で
-同等に表現できる範囲で移植しています。すべて `import polyse` を使い、ネイティブ
-CLI や `.polyse` 入力を経由しません。各スクリプトは場所を自動判定するため、
+隣接する開発リポジトリ `projects/paves/examples` の検証入力を、公開 Python API で
+同等に表現できる範囲で移植しています。すべて `import polypaves` を使い、ネイティブ
+CLI や `.paves` 入力を経由しません。各スクリプトは場所を自動判定するため、
 リポジトリ内のどの作業ディレクトリからでも実行できます。
 
 | 分類 | スクリプト | 内容 |

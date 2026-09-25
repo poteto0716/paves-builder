@@ -5,10 +5,10 @@
 Ubuntu 24.04 x86_64 と CPython 3.13 を使用します。リポジトリのルートで:
 
 ```bash
-python3 -m pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
+python3 -m pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
 python3 - <<'PY'
-import polyse
-print(polyse.__version__)
+import polypaves
+print(polypaves.__version__)
 PY
 ```
 
@@ -28,9 +28,9 @@ python examples/01_pcff_polystyrene/pmma_dp10/build.py
 ## 3. Python から確認
 
 ```python
-import polyse
+import polypaves
 
-system = polyse.build(
+system = polypaves.build(
     monomer="*CC*",
     dp=10,
     chains=2,
@@ -45,7 +45,7 @@ print(system.composition)
 ```
 
 入力不整合は `ValueError`、力場や構造ファイルの欠落は `FileNotFoundError`、
-型付け・パラメータ不足・配置失敗などは `polyse.BuildError` です。
+型付け・パラメータ不足・配置失敗などは `polypaves.BuildError` です。
 
 ## 4. 外部データの検証
 

@@ -1,7 +1,7 @@
-"""OpenMM helpers for the polyse adhesion workflow.
+"""OpenMM helpers for the polypaves adhesion workflow.
 
-The force field always comes from POLYSE's export (`openmm_system yes`): a
-serialised OpenMM System whose Class II terms were written by C++ (PolySE D069,
+The force field always comes from PAVES's export (`openmm_system yes`): a
+serialised OpenMM System whose Class II terms were written by C++ (PAVES D069,
 D075). Nothing here changes a coefficient. What a stage may change is the
 integration setup around it:
 
@@ -395,7 +395,7 @@ def velocities_A_per_fs(state):
 def write_lammps_data(template, out, positions_A, box, *, velocities=None, title=None, origin=(0.0, 0.0, 0.0)):
     """A LAMMPS data file: the template's types, charges and topology, new coordinates and box.
 
-    `template` is a data file POLYSE wrote for this exact system (same atom
+    `template` is a data file PAVES wrote for this exact system (same atom
     order). Coordinates are wrapped into [origin, origin + L) and the images
     are written as flags, so every molecule is whole on reading. Velocities, if
     given, are in A/fs (LAMMPS real units).
@@ -444,7 +444,7 @@ def write_lammps_data(template, out, positions_A, box, *, velocities=None, title
 
 
 def write_styles(template_styles, out_styles, data_name):
-    """The POLYSE styles file, pointed at another data file."""
+    """The PAVES styles file, pointed at another data file."""
     text = Path(template_styles).read_text()
     lines = [(f'read_data {data_name}' if l.startswith('read_data') else l) for l in text.splitlines()]
     Path(out_styles).write_text('\n'.join(lines) + '\n')

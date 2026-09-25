@@ -3,10 +3,10 @@
 公開 wheel は次を検査対象とします。
 
 - wheel に C/C++/Cython 生成 C、ヘッダー、object、static library がないこと
-- `polyse.api` と `polyse._native` が strip 済み ELF shared object であること
+- `polypaves.api` と `polypaves._native` が strip 済み ELF shared object であること
 - debug section、通常の symbol table、RPATH/RUNPATH、私有ビルドパスがないこと
 - 各 native extension の公開シンボルが対応する `PyInit_*` だけであること
-- 新規仮想環境へ wheel だけでインストールでき、`import polyse` が成功すること
+- 新規仮想環境へ wheel だけでインストールでき、`import polypaves` が成功すること
 - `Polymer`、`Copolymer`、`Solvent`、`System` の公開 API が import できること
 - OPLS の小規模系を構築し、座標・型・電荷・結合・組成を参照できること
 - examples の全 Python ファイルが構文検査を通ること
@@ -22,5 +22,5 @@ strip やパス検査は秘匿性を完全に保証するものではありま�
 最後に自動実行し、いずれかの条件を満たさなければ失敗します。
 
 ```bash
-scripts/audit_binary_wheel.sh dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
+scripts/audit_binary_wheel.sh dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
 ```

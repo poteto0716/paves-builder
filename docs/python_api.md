@@ -5,7 +5,7 @@
 単一ポリマー用の簡便 API です。
 
 ```python
-system = polyse.build(
+system = polypaves.build(
     monomer="*CC*",
     dp=20,
     chains=4,
@@ -23,12 +23,12 @@ system = polyse.build(
 ## component objects と `pack()`
 
 ```python
-polyse.Polymer(monomer, dp, name=None, terminator="*[H]")
-polyse.Copolymer(monomers, dp=None, architecture="random_exact",
+polypaves.Polymer(monomer, dp, name=None, terminator="*[H]")
+polypaves.Copolymer(monomers, dp=None, architecture="random_exact",
                  fractions=None, sequence=None, blocks=None,
                  name=None, terminator="*[H]")
-polyse.Solvent(smiles, name=None)
-polyse.Slab(path, name=None, format=None, fixed=True, preserve=False,
+polypaves.Solvent(smiles, name=None)
+polypaves.Slab(path, name=None, format=None, fixed=True, preserve=False,
             exclude_radius=0.0, replicate=(1, 1, 1))
 ```
 
@@ -48,7 +48,7 @@ polyse.Slab(path, name=None, format=None, fixed=True, preserve=False,
 ### Copolymer
 
 ```python
-copolymer = polyse.Copolymer(
+copolymer = polypaves.Copolymer(
     monomers={"M": "*CC(C)(C(=O)OC)*", "S": "*C(c1ccccc1)C*"},
     dp=40,
     fractions={"M": 0.7, "S": 0.3},
@@ -64,9 +64,9 @@ copolymer = polyse.Copolymer(
 ### Slab と充填領域
 
 ```python
-surface = polyse.Slab("surface.mol2", name="surface", fixed=True, exclude_radius=2.0)
-region = polyse.BoxRegion(origin=(0, 0, 25), lengths=(40, 40, 55))
-system = polyse.pack(
+surface = polypaves.Slab("surface.mol2", name="surface", fixed=True, exclude_radius=2.0)
+region = polypaves.BoxRegion(origin=(0, 0, 25), lengths=(40, 40, 55))
+system = polypaves.pack(
     [surface, pmma, toluene],
     counts={"pmma": 4, "toluene": 100},
     forcefield="surface_and_polymer.ff",
@@ -124,5 +124,5 @@ system.write_xyz("system.xyz")
 `forcefield=` には `.ff` のパス、`register_forcefield()` で登録した名前、または
 既知の別名を指定します。公開配布の `pcff` / `pcff_iff` はリポジトリの
 `examples/forcefields/` を探索します。別の場所から実行する場合は明示パス、
-`POLYSE_DATA_DIR`、`POLYSE_FORCEFIELD_DIR` のいずれかを使用してください。
+`POLYPAVES_DATA_DIR`、`POLYPAVES_FORCEFIELD_DIR` のいずれかを使用してください。
 

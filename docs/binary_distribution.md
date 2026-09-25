@@ -1,6 +1,6 @@
 # Binary distribution policy
 
-このリポジトリは polyse の利用用配布物であり、開発用ソースリポジトリではありません。
+このリポジトリは polypaves の利用用配布物であり、開発用ソースリポジトリではありません。
 
 ## 公開するもの
 
@@ -16,8 +16,8 @@
 - object/static library、ビルドツリー、compile database
 - debug symbol、開発ログ、私有パス、ソース管理情報
 
-wheel には `polyse._native` と `polyse.api` の2つの strip 済み拡張を収録します。
-`polyse/__init__.py` は公開 API 名を再 export する短い facade だけです。`api.py`、
+wheel には `polypaves._native` と `polypaves.api` の2つの strip 済み拡張を収録します。
+`polypaves/__init__.py` は公開 API 名を再 export する短い facade だけです。`api.py`、
 生成 C、C++ ソースは wheel に含めません。ビルド時のパスはコンパイラの prefix-map
 で除去し、ELF の debug section、通常の symbol table、RPATH/RUNPATH を検査します。
 動的シンボルは Python がロードに必要とする `PyInit_api` / `PyInit__native` だけを

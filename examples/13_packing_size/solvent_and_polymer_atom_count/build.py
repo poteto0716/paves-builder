@@ -1,12 +1,12 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-solvent = polyse.Solvent("CCCC", name="solvent")
-polymer = polyse.Polymer("*CC*", dp=10, terminator="*C", name="polymer")
-system = polyse.pack(
+solvent = polypaves.Solvent("CCCC", name="solvent")
+polymer = polypaves.Polymer("*CC*", dp=10, terminator="*C", name="polymer")
+system = polypaves.pack(
     [solvent, polymer],
     total_atoms=1000,
     mole_fractions={"solvent": 0.9, "polymer": 0.1},

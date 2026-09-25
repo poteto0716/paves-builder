@@ -2,17 +2,17 @@
 """Polymer / silica adhesion workflow: build, relax, press, relax, measure, pull.
 
     python adhesion.py new NAME --monomer SMILES --dp N --chains N [options]
-    python adhesion.py new NAME --polyse chemistry.polyse [options]      (copolymers etc.)
+    python adhesion.py new NAME --polypaves chemistry.paves [options]      (copolymers etc.)
     python adhesion.py run PROJECT [--from STAGE] [--to STAGE] [--only STAGE]
     python adhesion.py status PROJECT
     python adhesion.py report PROJECT
 
 Stages, in order:
 
-    build      the polymer melt (polyse), cell x/y = the silica supercell
+    build      the polymer melt (polypaves), cell x/y = the silica supercell
     bulk       pre-relaxation, then NPT with only z free
     surface    whole molecules, vacuum in z, NVT
-    assemble   the film on the silica supercell (polyse writes the combined system)
+    assemble   the film on the silica supercell (polypaves writes the combined system)
     compress   a wall presses the film onto the silica; bottom of the silica fixed
     cool       wall released, cooled
     relax      held at the final temperature
@@ -75,42 +75,42 @@ def cmd_new(a):
     sys.path.insert(0, str(WORKFLOW))
     import stages
     y.update({'build_density': a.density, 'seed': a.seed})
-    if a.polyse:
+    if a.polypaves:
         if a.monomer or a.dp or a.chains:
-            sys.exit('give either --polyse FILE or --monomer/--dp/--chains, not both')
+            sys.exit('give either --polypaves FILE or --monomer/--dp/--chains, not both')
         try:
-            kept, carried, dropped = stages.split_polyse(Path(a.polyse).read_text())
+            kept, carried, dropped = stages.split_polypaves(Path(a.polypaves).read_text())
         except ValueError as e:
-            sys.exit(f'{a.polyse}: {e}')
-        y['polyse_lines'] = kept
-        y['polyse_source'] = str(Path(a.polyse).resolve())
+            sys.exit(f'{a.polypaves}: {e}')
+        y['polypaves_lines'] = kept
+        y['polypaves_source'] = str(Path(a.polypaves).resolve())
         for k, v in carried.items():
             y[k] = int(v) if k != 'name' else v
         if dropped:
-            print(f'  set by the workflow, ignored from {Path(a.polyse).name}: {", ".join(dict.fromkeys(dropped))}')
+            print(f'  set by the workflow, ignored from {Path(a.polypaves).name}: {", ".join(dict.fromkeys(dropped))}')
     else:
         if not (a.monomer and a.dp and a.chains):
-            sys.exit('give --monomer, --dp and --chains, or --polyse FILE (copolymers, blocks, random, ...)')
+            sys.exit('give --monomer, --dp and --chains, or --polypaves FILE (copolymers, blocks, random, ...)')
         y.update({'monomer': a.monomer, 'terminator': a.terminator, 'dp': a.dp, 'chains': a.chains})
     cfg['assemble']['supercell'] = [a.supercell[0], a.supercell[1], 1]
     cfg['forcefield'] = FORCEFIELDS[a.forcefield]
     if a.test:
         cfg['step_scale'] = 0.01
-    # polyse's own parser checks the build input now, not hours into a run.
+    # polypaves's own parser checks the build input now, not hours into a run.
     check = dict(cfg, forcefield=resolve(cfg['forcefield'], project), silica_mol2=resolve(cfg['silica_mol2'], project))
     text, (Lx, Ly) = stages.polymer_input(check)
     project.mkdir(parents=True, exist_ok=True)
-    probe = project / '.check.polyse'
+    probe = project / '.check.paves'
     probe.write_text(text)
     try:
-        from polyse.config import InputParser
+        from polypaves.config import InputParser
         InputParser.parse(str(probe)).resolved_input()
     except Exception as e:
-        sys.exit(f'polyse rejects this polymer input: {e}\n(the input it was given: {probe})')
+        sys.exit(f'polypaves rejects this polymer input: {e}\n(the input it was given: {probe})')
     probe.unlink()
     (project / 'project.json').write_text(json.dumps(cfg, indent=1) + '\n')
     print(f'created {project}/project.json')
-    what = (f'{Path(a.polyse).name}' if a.polyse else f'{y["monomer"]}  DP {y["dp"]} x {y["chains"]} chains')
+    what = (f'{Path(a.polypaves).name}' if a.polypaves else f'{y["monomer"]}  DP {y["dp"]} x {y["chains"]} chains')
     print(f'  polymer: {what}; substrate {a.supercell[0]} x {a.supercell[1]} silica ({Lx:.1f} x {Ly:.1f} A)'
           + ('  [test: steps x 0.01]' if a.test else ''))
     print(f'next:  python {Path(__file__).name} run {project}')
@@ -225,8 +225,8 @@ def main():
     n.add_argument('--terminator', default='*C', help="chain end group (default '*C', methyl)")
     n.add_argument('--dp', type=int, help='repeat units per chain')
     n.add_argument('--chains', type=int, help='number of chains')
-    n.add_argument('--polyse', metavar='FILE',
-                   help='a .polyse file with the chemistry (copolymers: blocks, random, alternating, explicit '
+    n.add_argument('--polypaves', metavar='FILE',
+                   help='a .paves file with the chemistry (copolymers: blocks, random, alternating, explicit '
                         'sequences, distributions, mixtures) instead of --monomer/--dp/--chains')
     n.add_argument('--supercell', type=int, nargs=2, default=[3, 2], metavar=('NX', 'NY'),
                    help='silica supercell in x and y (default 3 2 = 120.9 x 82.9 A)')

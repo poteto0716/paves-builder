@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-system = polyse.build(
+system = polypaves.build(
     monomer="*C(c1ccccc1)C*",
     forcefield=here.parents[1] / "forcefields/pcff.ff",
     chains=2,

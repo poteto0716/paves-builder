@@ -1,4 +1,4 @@
-"""Stages of the polyse adhesion workflow (driven by adhesion.py).
+"""Stages of the polypaves adhesion workflow (driven by adhesion.py).
 
 Each stage reads the previous stage's directory under <project>/runs/ and writes its
 own: state.xml (OpenMM positions, velocities, box), final.data + in.styles (LAMMPS),
@@ -64,7 +64,7 @@ def finish(stage, context, system, template, styles, *, top=None, extra=None):
     pos, box = T.positions_A(st), T.box_A(st)
     vel = T.velocities_A_per_fs(st)
     T.write_lammps_data(template, stage.dir / 'final.data', pos, box, velocities=vel,
-                        title=f'{stage.dir.name} (OpenMM -> LAMMPS, polyse-interface)')
+                        title=f'{stage.dir.name} (OpenMM -> LAMMPS, paves-interface)')
     T.write_styles(styles, stage.dir / 'in.styles', 'final.data')
     if top is None:
         top, _ = T.topology(system)
@@ -81,7 +81,7 @@ def density_g_cm3(system, box_A):
     return T.masses(system).sum() / AVOGADRO / (np.prod(box_A) * 1e-24)
 
 
-# --- 01 build: POLYSE makes the polymer melt ------------------------------------
+# --- 01 build: PAVES makes the polymer melt ------------------------------------
 
 def silica_cell(cfg):
     """(Lx, Ly, Lz) of the substrate model, from the MOL2's CRYSIN record."""
@@ -90,15 +90,15 @@ def silica_cell(cfg):
     return [float(v) for v in lines[k + 1].split()[:3]]
 
 
-# Records the workflow sets itself; a user's .polyse may not choose them.
+# Records the workflow sets itself; a user's .paves may not choose them.
 OWNED_RECORDS = {'forcefield', 'cell', 'density', 'periodic', 'output', 'openmm_system', 'temperature',
                  'backend', 'platform', 'precision', 'region', 'soft_wall', 'relax', 'minimize'}
 REFUSED_RECORDS = {'environment', 'structure', 'structure_format', 'structure_topology'}
 CARRIED_RECORDS = {'name', 'seed', 'sequence_seed'}
 
 
-def split_polyse(text):
-    """A user's .polyse -> (chemistry lines kept, {carried record: value}, [owned records dropped]).
+def split_polypaves(text):
+    """A user's .paves -> (chemistry lines kept, {carried record: value}, [owned records dropped]).
 
     The first word of a line is its record. Lines inside a `composition` ...
     `end` block are kept as they are.
@@ -115,7 +115,7 @@ def split_polyse(text):
             kept.append(line)
             in_block = key != 'end'
             continue
-        if key == 'polyse-build':
+        if key == 'polypaves-build':
             continue
         if key in REFUSED_RECORDS:
             raise ValueError(f"'{key}' cannot be used here: the workflow builds the polymer from its chemistry "
@@ -133,19 +133,19 @@ def split_polyse(text):
 
 
 def polymer_input(cfg):
-    """The .polyse text of the build stage, from project.json."""
+    """The .paves text of the build stage, from project.json."""
     y = cfg['system']
     cell = silica_cell(cfg)
     nx, ny, _ = cfg['assemble']['supercell']
     Lx, Ly = cell[0] * nx, cell[1] * ny
-    if 'polyse_lines' in y:
-        chemistry = '\n'.join(y['polyse_lines'])
+    if 'polypaves_lines' in y:
+        chemistry = '\n'.join(y['polypaves_lines'])
     else:
         chemistry = (f"monomer       A '{y['monomer']}'\n"
                      f"terminator    '{y.get('terminator', '*C')}'\n"
                      f"degree        {y['dp']}\n"
                      f"chains        {y['chains']}")
-    text = f"""polyse-build 1
+    text = f"""polypaves-build 1
 # Written by adhesion.py from project.json. Edit project.json, not this file.
 # The cell's x and y are the {nx} x {ny} substrate supercell, so the melt fits it.
 name          {y.get('name', cfg['name'])}
@@ -166,9 +166,9 @@ def stage_build(cfg, runs):
     s = Stage(cfg, runs, '01_build')
     y = cfg['system']
     text, (Lx, Ly) = polymer_input(cfg)
-    (s.dir / 'polymer.polyse').write_text(text)
+    (s.dir / 'polymer.paves').write_text(text)
     s.say(f'building {cfg["name"]}: cell {Lx:.4f} x {Ly:.4f} A, z from {y.get("build_density", 1.0)} g/cm3')
-    polyse_build(cfg, s.dir, 'polymer.polyse')
+    polypaves_build(cfg, s.dir, 'polymer.paves')
     st = T.load_xml(s.dir / 'polymer.openmm_state.xml')
     info = {'stage': '01_build', 'atoms': int(len(T.positions_A(st))), 'box_A': T.box_A(st).tolist(),
             'wall_seconds': time.time() - s.t0}
@@ -280,7 +280,7 @@ def stage_surface(cfg, runs):
     finish(s, ctx, system, str(build) + '.data', str(build) + '.in.styles', extra={'steps': n})
 
 
-# --- 04 assemble: POLYSE combines silica supercell + polymer slab ----------------
+# --- 04 assemble: PAVES combines silica supercell + polymer slab ----------------
 
 def stage_assemble(cfg, runs):
     s = Stage(cfg, runs, '04_assemble')
@@ -291,7 +291,7 @@ def stage_assemble(cfg, runs):
     box = T.box_A(prev)
     pos = T.unwrap(T.positions_A(prev), box, T.bonds(polymer_sys))
 
-    # The silica model's own extent, from the file POLYSE will replicate.
+    # The silica model's own extent, from the file PAVES will replicate.
     silica_z = []
     section = ''
     for line in Path(cfg['silica_mol2']).read_text().splitlines():
@@ -309,7 +309,7 @@ def stage_assemble(cfg, runs):
     cell = [box[0], box[1], Lz]
     T.write_lammps_data(str(build) + '.data', s.dir / 'polymer_slab.data', pos, cell, title='polymer slab for assembly')
 
-    inp = s.dir / 'interface.polyse'
+    inp = s.dir / 'interface.paves'
     inp.write_text(f"""# Written by pipeline.py assemble. Silica keeps its IFF types and charges;
 # the polymer keeps the PCFF types and bond-increment charges it was built with.
 name          {cfg['name']}_interface
@@ -323,7 +323,7 @@ openmm_system yes
 output        out interface
 """)
     (s.dir / 'out').mkdir(exist_ok=True)
-    polyse_build(cfg, s.dir, inp.name)
+    polypaves_build(cfg, s.dir, inp.name)
 
     system = T.load_xml(s.dir / 'out/interface.openmm_system.xml')
     st = T.load_xml(s.dir / 'out/interface.openmm_state.xml')
@@ -503,11 +503,11 @@ def stage_relax(cfg, runs):
 
 # --- 08 interface energy: E_int = E(all) - E(polymer) - E(slab) -----------------
 
-def polyse_build(cfg, workdir, inp_name):
-    """Build a POLYSE input in its directory with the installed polyse package."""
+def polypaves_build(cfg, workdir, inp_name):
+    """Build a PAVES input in its directory with the installed polypaves package."""
     import contextlib
     import traceback
-    from polyse.config import from_file
+    from polypaves.config import from_file
     import os
     log = workdir / (inp_name + '.log')
     # The engine writes progress to the process's own stdout/stderr (C level), so
@@ -534,11 +534,11 @@ def polyse_build(cfg, workdir, inp_name):
             os.close(saved[0])
             os.close(saved[1])
     if not ok:
-        sys.exit(f'polyse could not build {workdir / inp_name}; see {log}')
+        sys.exit(f'polypaves could not build {workdir / inp_name}; see {log}')
 
 
 def silica_only_system(cfg, runs):
-    """The substrate alone, built by POLYSE in the interface cell (same atoms, same order)."""
+    """The substrate alone, built by PAVES in the interface cell (same atoms, same order)."""
     d = runs / '04_assemble'
     xml = d / 'out_silica/silica.openmm_system.xml'
     if xml.exists():
@@ -547,7 +547,7 @@ def silica_only_system(cfg, runs):
     box = info['box_A']
     nx, ny, nz = cfg['assemble']['supercell']
     (d / 'out_silica').mkdir(exist_ok=True)
-    (d / 'silica_only.polyse').write_text(f"""# Written by pipeline.py: the substrate alone, for interface energies.
+    (d / 'silica_only.paves').write_text(f"""# Written by pipeline.py: the substrate alone, for interface energies.
 name          silica_only
 seed          2026
 forcefield    {cfg['forcefield']}
@@ -557,7 +557,7 @@ temperature   300
 openmm_system yes
 output        out_silica silica
 """)
-    polyse_build(cfg, d, 'silica_only.polyse')
+    polypaves_build(cfg, d, 'silica_only.paves')
     return xml
 
 

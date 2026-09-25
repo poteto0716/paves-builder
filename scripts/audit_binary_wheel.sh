@@ -5,10 +5,10 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 WHEEL=${1:-}
 
 if [[ -z "$WHEEL" ]]; then
-    WHEEL=$(find "$ROOT/dist" -maxdepth 1 -type f -name 'polyse-*.whl' -print -quit)
+    WHEEL=$(find "$ROOT/dist" -maxdepth 1 -type f -name 'polypaves-*.whl' -print -quit)
 fi
 [[ -n "$WHEEL" && -f "$WHEEL" ]] || {
-    echo "polyse wheel not found: ${WHEEL:-<none>}" >&2
+    echo "polypaves wheel not found: ${WHEEL:-<none>}" >&2
     exit 2
 }
 
@@ -26,7 +26,7 @@ unzip -q "$WHEEL" -d "$STAGE"
 mapfile -t MEMBERS < <(unzip -Z1 "$WHEEL")
 for member in "${MEMBERS[@]}"; do
     case "$member" in
-        polyse/__init__.py|*.so|*.dist-info/*) ;;
+        polypaves/__init__.py|*.so|*.dist-info/*) ;;
         *.py|*.pyi|*.pyx|*.pxd|*.c|*.cc|*.cpp|*.h|*.hh|*.hpp|*.o|*.a|*.debug)
             echo "source or development artifact found in wheel: $member" >&2
             exit 1
@@ -34,12 +34,12 @@ for member in "${MEMBERS[@]}"; do
     esac
 done
 
-mapfile -t EXTENSIONS < <(find "$STAGE/polyse" -maxdepth 1 -type f -name '*.so' -print | sort)
+mapfile -t EXTENSIONS < <(find "$STAGE/polypaves" -maxdepth 1 -type f -name '*.so' -print | sort)
 [[ ${#EXTENSIONS[@]} -ge 2 ]] || {
     echo "expected the native engine and compiled modules, found ${#EXTENSIONS[@]} extensions" >&2
     exit 1
 }
-[[ -n $(find "$STAGE/polyse" -maxdepth 1 -name '_native*.so' -print -quit) ]] || {
+[[ -n $(find "$STAGE/polypaves" -maxdepth 1 -name '_native*.so' -print -quit) ]] || {
     echo "native engine extension missing" >&2
     exit 1
 }
@@ -57,7 +57,7 @@ for extension in "${EXTENSIONS[@]}"; do
         echo "RPATH or RUNPATH found: $(basename "$extension")" >&2
         exit 1
     fi
-    if strings -a "$extension" | grep -Eq '/home/|/Users/|/private/var/|/tmp/[^[:space:]]*(polyse|pip-)'; then
+    if strings -a "$extension" | grep -Eq '/home/|/Users/|/private/var/|/tmp/[^[:space:]]*(polypaves|pip-)'; then
         echo "private build path found: $(basename "$extension")" >&2
         exit 1
     fi

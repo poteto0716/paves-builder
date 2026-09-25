@@ -1,16 +1,16 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-polymer = polyse.Polymer(
+polymer = polypaves.Polymer(
     "*CC*",
     dp=20,
     terminator=("*C", "*c1ccccc1"),
     name="asymmetric_end_groups",
 )
-system = polyse.pack(
+system = polypaves.pack(
     [polymer],
     counts={"asymmetric_end_groups": 6},
     forcefield=here.parents[1] / "forcefields/pcff.ff",

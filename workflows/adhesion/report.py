@@ -270,7 +270,7 @@ def main(argv=None):
                                    'pts': [[float(r['time_ps']), float(r['gamma_mJ_m2'])] for r in er]}]})
     done = [s['num'] for s in stages]
     data = {
-        'meta': {'eyebrow': f'polyse adhesion workflow · {a.name}',
+        'meta': {'eyebrow': f'polypaves adhesion workflow · {a.name}',
                  'title': f'{a.name}: adhesion on silica',
                  'lede': (f'Polymer film (<b>{I.n - I.nsi:,} atoms</b>) pressed onto IFF amorphous '
                           f'silica (<b>{I.nsi:,} atoms</b>), PC-IFF in OpenMM. Stages finished: {", ".join(done)}. '

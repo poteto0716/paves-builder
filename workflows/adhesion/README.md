@@ -2,15 +2,15 @@
 
 任意の高分子について、バルク作成 → 表面作成 → シリカ上への設置 → 加圧密着 → 冷却・緩和
 → **界面エネルギー評価** → **引張（剥離）** までを一続きで実行します。構造と力場は
-polyse（`dist/` の wheel）、分子動力学は OpenMM で計算し、各段階の構造は LAMMPS でも
+polypaves（`dist/` の wheel）、分子動力学は OpenMM で計算し、各段階の構造は LAMMPS でも
 そのまま実行できる形式で出力します。
 
 ## 準備（初回のみ）
 
 ```bash
 conda env create -f workflows/adhesion/environment.yml
-conda activate polyse-adhesion
-pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
+conda activate polypaves-adhesion
+pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
 ```
 
 GPU（CUDA または OpenCL）があれば自動で使います。無ければ CPU で動きますが、
@@ -44,7 +44,7 @@ python adhesion.py run projects/ps_test
 | `--monomer SMILES` | 繰り返し単位（両端 `*`） |
 | `--terminator SMILES` | 末端基（既定 `*C` = メチル） |
 | `--dp N`, `--chains N` | 重合度と鎖数 |
-| `--polyse-lines FILE` | 共重合体などを polyse の化学指定行で書く場合（`--monomer/--dp/--chains` の代わり） |
+| `--polypaves-lines FILE` | 共重合体などを polypaves の化学指定行で書く場合（`--monomer/--dp/--chains` の代わり） |
 | `--supercell NX NY` | シリカのスーパーセル（既定 3 2 = 120.9 × 82.9 Å） |
 | `--density` | ビルド密度 g/cm³（既定 1.0。バルク NPT で平衡密度へ） |
 | `--forcefield` | `pcff-iff-mod`（既定。下の「修正 PCFF-IFF」参照）または `pcff-iff`（公開版そのまま） |
@@ -70,10 +70,10 @@ python adhesion.py run projects/pmma --only interface   # 1 段階だけ
 
 | # | 段階 | 内容 | dt / SHAKE |
 |---|---|---|---|
-| 01 | build | polyse で高分子メルトを作成。セル x, y = シリカスーパーセル | — |
+| 01 | build | polypaves で高分子メルトを作成。セル x, y = シリカスーパーセル | — |
 | 02 | bulk | 変位制限付き予備緩和 → z 方向のみ可動の NPT (1 atm): 550 K 20万, 550→300 K 20万, 300 K 10万 step | 1 fs / あり |
 | 03 | surface | 分子を切らずに z 方向へ真空 60 Å、NVT 550→300 K 20万 step | 1 fs / あり |
-| 04 | assemble | シリカ上 3.0 Å に設置、上に真空 60 Å。polyse が結合系を作成 | — |
+| 04 | assemble | シリカ上 3.0 Å に設置、上に真空 60 Å。polypaves が結合系を作成 | — |
 | 05 | compress | シリカ最下層 3.0 Å 固定、壁で 200 MPa、550 K 60万 step（trajectory 保存） | 1 fs / あり |
 | 06 | cool | 壁を解除、550→300 K 20万 step | 0.25 fs / なし |
 | 07 | relax | 300 K 50万 step | 0.25 fs / なし |

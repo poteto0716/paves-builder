@@ -1,14 +1,14 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
 components = [
-    polyse.Solvent("CC", name="ethane"),
-    polyse.Polymer("*CC*", dp=20, terminator="*C", name="pe20"),
-    polyse.Polymer("*CCCC*", dp=10, terminator="*C", name="pb10"),
-    polyse.Copolymer(
+    polypaves.Solvent("CC", name="ethane"),
+    polypaves.Polymer("*CC*", dp=20, terminator="*C", name="pe20"),
+    polypaves.Polymer("*CCCC*", dp=10, terminator="*C", name="pb10"),
+    polypaves.Copolymer(
         monomers={"A": "*CC*", "B": "*CCCC*"},
         dp=14,
         fractions={"A": 0.5, "B": 0.5},
@@ -17,7 +17,7 @@ components = [
         name="copolymer",
     ),
 ]
-system = polyse.pack(
+system = polypaves.pack(
     components,
     total_atoms=1600,
     weight_fractions={"ethane": 0.1, "pe20": 0.3, "pb10": 0.3, "copolymer": 0.3},

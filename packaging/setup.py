@@ -12,7 +12,7 @@ from setuptools.command.build_py import build_py
 
 
 root = Path(__file__).resolve().parent
-version = os.environ.get("POLYSE_VERSION", "0.2.1")
+version = os.environ.get("POLYPAVES_VERSION", "0.3.0")
 
 
 class StrippedBuildExt(build_ext):
@@ -49,7 +49,7 @@ class StrippedBuildExt(build_ext):
 
 
 # Every module of the package except the facade is compiled; none ships as source.
-COMPILED = sorted(path.stem for path in (root / "polyse").glob("*.py") if path.stem != "__init__")
+COMPILED = sorted(path.stem for path in (root / "polypaves").glob("*.py") if path.stem != "__init__")
 
 
 class PublicBuildPy(build_py):
@@ -61,8 +61,8 @@ class PublicBuildPy(build_py):
 extensions = cythonize(
     [
         Extension(
-            f"polyse.{name}",
-            [f"polyse/{name}.py"],
+            f"polypaves.{name}",
+            [f"polypaves/{name}.py"],
             extra_compile_args=[
                 "-O3",
                 "-fvisibility=hidden",
@@ -83,16 +83,16 @@ extensions = cythonize(
 )
 
 setup(
-    name="polyse",
+    name="polypaves",
     version=version,
-    description="Molecular system construction and packing from Python",
+    description="PAVES: Polymer Automation for Virtual Evaluation and Simulation",
     python_requires=">=3.10",
     packages=find_packages(),
-    package_data={"polyse": ["_native*.so"]},
+    package_data={"polypaves": ["_native*.so"]},
     include_package_data=False,
     ext_modules=extensions,
     cmdclass={"build_ext": StrippedBuildExt, "build_py": PublicBuildPy},
     zip_safe=False,
-    # `polyse-build INPUT.polyse [key=value ...]`: the file-driven builder, from the compiled cli module.
-    entry_points={"console_scripts": ["polyse-build = polyse.cli:main"]},
+    # `polypaves-build INPUT.paves [key=value ...]`: the file-driven builder, from the compiled cli module.
+    entry_points={"console_scripts": ["polypaves-build = polypaves.cli:main"]},
 )

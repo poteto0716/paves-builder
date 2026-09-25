@@ -1,15 +1,15 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
 components = [
-    polyse.Solvent("Cc1ccccc1", name="toluene"),
-    polyse.Polymer("*C(c1ccccc1)C*", dp=4, terminator="*C", name="polystyrene"),
-    polyse.Polymer("*CC(C)(C(=O)OC)*", dp=4, terminator="*C", name="pmma"),
+    polypaves.Solvent("Cc1ccccc1", name="toluene"),
+    polypaves.Polymer("*C(c1ccccc1)C*", dp=4, terminator="*C", name="polystyrene"),
+    polypaves.Polymer("*CC(C)(C(=O)OC)*", dp=4, terminator="*C", name="pmma"),
 ]
-system = polyse.pack(
+system = polypaves.pack(
     components,
     total_atoms=800,
     weight_fractions={"toluene": 0.2, "polystyrene": 0.4, "pmma": 0.4},

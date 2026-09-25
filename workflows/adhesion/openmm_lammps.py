@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert structures between OpenMM and LAMMPS for the same polyse-built system.
+"""Convert structures between OpenMM and LAMMPS for the same polypaves-built system.
 
     # OpenMM State -> LAMMPS data (types, charges, topology from a template data file)
     python openmm_lammps.py to-lammps --state runs/07_relax/state.xml \\
@@ -10,7 +10,7 @@
     python openmm_lammps.py to-openmm --data relaxed.data \\
         --system runs/04_assemble/out/interface.openmm_system.xml --out state.xml
 
-Both directions keep the atom order of the polyse build. Coordinates written to
+Both directions keep the atom order of the polypaves build. Coordinates written to
 LAMMPS are wrapped into the cell with image flags, so molecules are whole on
 reading; coordinates read from LAMMPS are unwrapped with those flags. Units:
 LAMMPS real (A, A/fs), OpenMM (nm, nm/ps).
@@ -107,9 +107,9 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     l = sub.add_parser('to-lammps')
     l.add_argument('--state', required=True)
-    l.add_argument('--template', required=True, help='a data file polyse wrote for the same system')
+    l.add_argument('--template', required=True, help='a data file polypaves wrote for the same system')
     l.add_argument('--out', required=True)
-    l.add_argument('--styles', help='the in.styles polyse wrote; copied and pointed at --out')
+    l.add_argument('--styles', help='the in.styles polypaves wrote; copied and pointed at --out')
     o = sub.add_parser('to-openmm')
     o.add_argument('--data', required=True)
     o.add_argument('--system', required=True, help='the openmm_system.xml of the same system')

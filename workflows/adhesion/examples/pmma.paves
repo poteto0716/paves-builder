@@ -1,6 +1,6 @@
-polyse-build 1
+polypaves-build 1
 # PMMA homopolymer, DP 200 x 20 chains (60,160 atoms): the reference case.
-# Use with: python adhesion.py new pmma --polyse examples/pmma.polyse
+# Use with: python adhesion.py new pmma --polypaves examples/pmma.paves
 name          pmma
 monomer       A '*CC(C)(C(=O)OC)*'
 terminator    '*C'

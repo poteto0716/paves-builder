@@ -1,12 +1,12 @@
 # Runtime environment for the adhesion workflow.
 #   conda env create -f workflows/adhesion/environment.yml
-#   conda activate polyse-adhesion
-#   pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
-name: polyse-adhesion
+#   conda activate polypaves-adhesion
+#   pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
+name: polypaves-adhesion
 channels:
   - conda-forge
 dependencies:
-  - python=3.13        # the polyse wheel is built for CPython 3.13
+  - python=3.13        # the polypaves wheel is built for CPython 3.13
   - openmm>=8.2        # CUDA / OpenCL / CPU platforms
   # OpenMM's CUDA build must not be newer than what the GPU driver supports
   # (`nvidia-smi` shows it). CUDA 12 builds run on every driver from 12.x on;

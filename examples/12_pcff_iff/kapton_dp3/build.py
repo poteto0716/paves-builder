@@ -1,16 +1,16 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-kapton = polyse.Polymer(
+kapton = polypaves.Polymer(
     "*N1C(=O)c2cc3c(cc2C1=O)C(=O)N(C3=O)c4ccc(Oc5ccc(*)cc5)cc4",
     dp=3,
     terminator=("*c1ccccc1", "*c1ccccc1"),
     name="kapton",
 )
-system = polyse.pack(
+system = polypaves.pack(
     [kapton],
     counts={"kapton": 4},
     forcefield=here.parents[1] / "forcefields/pcff_iff_long_bulk.ff",

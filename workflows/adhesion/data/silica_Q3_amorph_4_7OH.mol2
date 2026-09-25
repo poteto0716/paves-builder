@@ -1,5 +1,5 @@
 # Converted from an INTERFACE force field surface model by
-# tools/iff_silica_to_polyse.py. Types and charges are the
+# tools/iff_silica_to_polypaves.py. Types and charges are the
 # published ones; see SOURCES.md for the model and its citation.
 @<TRIPOS>MOLECULE
 silica

@@ -1,10 +1,10 @@
 # External data
 
 このリポジトリの `external/` には examples を再現するための固定版 PCFF/IFF データと
-silica 座標を収録しています。これらは polyse の所有物ではなく、polyse の
+silica 座標を収録しています。これらは polypaves の所有物ではなく、polypaves の
 [LICENSE](../LICENSE) は適用されません。利用・再配布条件は各権利者の条件を確認して
 ください。以下の手順は、収録コピーを公式配布物から checksum 検証付きで復元する
-ためのものです。EMC executable は polyse に使用・リンクしていません。
+ためのものです。EMC executable は polypaves に使用・リンクしていません。
 
 ## PCFF polymer examples
 
@@ -32,7 +32,7 @@ use only relative paths within this repository.
 The inspected EMC installation includes GPLv3 license text, while its SourceForge
 project metadata labels the project MIT. Neither observation by itself establishes
 rights to redistribute the separately sourced historical PCFF database.収録されていること自体
-からライセンスを推定したり、polyse が権利を付与したりするものではありません。
+からライセンスを推定したり、polypaves が権利を付与したりするものではありません。
 
 ## IFF silica/polymer interface
 
@@ -82,5 +82,5 @@ For the silica models cite F. S. Emami et al., *Chem. Mater.* 2014, 26, 2647,
 [DOI](https://doi.org/10.1021/cm500365c).
 Consult the PCFF database's reference records for the original parameter sources.
 
-第三者データは polyse wheel 自体には格納していません。`external/` のファイルを
+第三者データは polypaves wheel 自体には格納していません。`external/` のファイルを
 別の成果物へ再梱包する場合も、各権利者の条件を別途確認してください。

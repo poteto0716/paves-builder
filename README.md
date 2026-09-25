@@ -1,9 +1,14 @@
-# polyse
+# PAVES
 
-`polyse` は、モノマーの SMILES と組成指定から分子動力学用の分子系を構築する
+**Polymer Automation for Virtual Evaluation and Simulation**
+
+*Pave the way from polymer chemistry to simulation.*
+
+PAVES は、モノマーの SMILES と組成指定から分子動力学用の分子系を構築する
 Python パッケージです。Python から C++ エンジンを直接呼び出し、座標・型・電荷・
-結合・組成などを参照できる `System` を返します。正式名称と Python パッケージ名は
-どちらも **polyse** です。
+結合・組成などを参照できる `System` を返します。正式名称は **PAVES**、Python パッケージ名と
+コマンド名は **polypaves** です（`paves` は PyPI で別のパッケージが使っています）。
+0.2.x までの名前は polyse でした。
 
 この公開リポジトリは Linux 用バイナリ wheel、Python API の使用例、ドキュメント、
 力場データを配布します。エンジンの C/C++ ソース、ヘッダー、オブジェクト、ビルド
@@ -15,10 +20,10 @@ Python パッケージです。Python から C++ エンジンを直接呼び出�
 Python ABI とプラットフォームが一致しない環境にはインストールできません。
 
 ```bash
-git clone <repository-url> polyse
-cd polyse
-python3 -m pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
-python3 -c 'import polyse; print(polyse.__version__)'
+git clone <repository-url> polypaves
+cd polypaves
+python3 -m pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
+python3 -c 'import polypaves; print(polypaves.__version__)'
 sha256sum -c SHA256SUMS
 ```
 
@@ -32,8 +37,8 @@ sha256sum -c SHA256SUMS
 [`workflows/adhesion/`](workflows/adhesion/README.md) に収録しています。
 
 ```bash
-conda env create -f workflows/adhesion/environment.yml && conda activate polyse-adhesion
-pip install dist/polyse-0.2.1-cp313-cp313-linux_x86_64.whl
+conda env create -f workflows/adhesion/environment.yml && conda activate polypaves-adhesion
+pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
 cd workflows/adhesion
 python adhesion.py new pmma --monomer '*CC(C)(C(=O)OC)*' --dp 200 --chains 20
 python adhesion.py run projects/pmma            # 中断しても同じコマンドで続きから
@@ -42,9 +47,9 @@ python adhesion.py run projects/pmma            # 中断しても同じコマン
 ## 最初の分子系
 
 ```python
-import polyse
+import polypaves
 
-system = polyse.build(
+system = polypaves.build(
     monomer="*CC(C)(C(=O)OC)*",  # PMMA
     forcefield="pcff",
     chains=20,
@@ -65,13 +70,13 @@ system.write_lammps("pmma_system")
 `Polymer`、`Copolymer`、`Solvent`、`Slab` を組み合わせられます。
 
 ```python
-import polyse
+import polypaves
 
-pmma = polyse.Polymer("*CC(C)(C(=O)OC)*", dp=20, name="pmma")
-toluene = polyse.Solvent("Cc1ccccc1", name="toluene")
+pmma = polypaves.Polymer("*CC(C)(C(=O)OC)*", dp=20, name="pmma")
+toluene = polypaves.Solvent("Cc1ccccc1", name="toluene")
 
 # 成分ごとの個数を指定
-system = polyse.pack(
+system = polypaves.pack(
     [pmma, toluene],
     counts={"pmma": 4, "toluene": 100},
     forcefield="pcff",
@@ -79,7 +84,7 @@ system = polyse.pack(
 )
 
 # 全原子数の目標と weight 比を指定
-system = polyse.pack(
+system = polypaves.pack(
     [pmma, toluene],
     total_atoms=10_000,
     weight_fractions={"pmma": 0.7, "toluene": 0.3},
@@ -96,7 +101,7 @@ print(system.composition)  # 実現した個数、mol比、weight比
 
 ## examples
 
-[examples](examples/README.md) は `projects/polyse/examples` の検証例を Python API
+[examples](examples/README.md) は `projects/paves/examples` の検証例を Python API
 へ移植したものです。収録した実行入力はすべて `.py` で、独自入力ファイルや
 CLI サブプロセスを使いません。
 

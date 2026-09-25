@@ -1,4 +1,4 @@
-polyse-build 1
+polypaves-build 1
 # PMMA-alt-PS: A-B-A-B..., DP 200, 20 chains (~62,000 atoms).
 name          pmma_alt_ps
 monomer       A '*CC(C)(C(=O)OC)*'

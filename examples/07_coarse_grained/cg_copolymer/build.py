@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import polyse
+import polypaves
 
 
 here = Path(__file__).resolve().parent
-copolymer = polyse.Copolymer(
+copolymer = polypaves.Copolymer(
     monomers={"A": "*[Aa]*", "B": "*[Bb]*"},
     dp=30,
     fractions={"A": 0.5, "B": 0.5},
@@ -12,7 +12,7 @@ copolymer = polyse.Copolymer(
     terminator="*[Aa]",
     name="cg_random",
 )
-system = polyse.pack(
+system = polypaves.pack(
     [copolymer],
     counts={"cg_random": 4},
     forcefield=here.parents[1] / "forcefields/cg_copolymer.ff",
