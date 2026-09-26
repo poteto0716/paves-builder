@@ -72,7 +72,7 @@ python adhesion.py run projects/pmma --only interface   # 1 段階だけ
 |---|---|---|---|
 | 01 | build | polypaves で高分子メルトを作成。セル x, y = シリカスーパーセル | — |
 | 02 | bulk | 変位制限付き予備緩和 → z 方向のみ可動の NPT (1 atm): 550 K 20万, 550→300 K 20万, 300 K 10万 step | 1 fs / あり |
-| 03 | surface | 分子を切らずに z 方向へ真空 60 Å、NVT 550→300 K 20万 step | 1 fs / あり |
+| 03 | surface | 分子を切らずに z 方向へ真空 60 Å。上下の壁で膜厚を bulk Lz × 1.1 まで寄せる (550 K 30万 step + 保持 10万 step) → 壁を外して NVT 550→300 K 20万 step | 1 fs / あり |
 | 04 | assemble | シリカ上 3.0 Å に設置、上に真空 60 Å。polypaves が結合系を作成 | — |
 | 05 | compress | シリカ最下層 3.0 Å 固定、壁で 200 MPa、550 K 60万 step（trajectory 保存） | 1 fs / あり |
 | 06 | cool | 壁を解除、550→300 K 20万 step | 0.25 fs / なし |
