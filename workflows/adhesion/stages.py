@@ -23,6 +23,8 @@ import mdtools as T  # noqa: E402
 
 ATM_TO_BAR = 1.01325
 AVOGADRO = 6.02214076e23
+# For settings added after a project.json was written.
+DEFAULTS = json.loads((HERE / 'defaults.json').read_text())
 
 
 # --- plumbing ------------------------------------------------------------------
@@ -256,6 +258,32 @@ def stage_surface(cfg, runs):
     new_box = np.array([box[0], box[1], (zmax - zmin) + vac])
     s.say(f'bulk Lz {box[2]:.3f} A; whole molecules span z {zmax - zmin:.3f} A; new Lz {new_box[2]:.3f} A')
     system.setDefaultPeriodicBoxVectors(*[mm.Vec3(*v) for v in np.diag(new_box * 0.1)])
+
+    # Squeeze: a chain that crossed the bulk's z boundary comes out of the unwrap
+    # sticking one or more Lz into the vacuum, and does not retract on its own
+    # within the stage. Two harmonic walls close in on the film's dense layer
+    # (the Lz-wide window holding the most atoms), hold, and are switched off.
+    sq = c.get('default_squeeze', DEFAULTS['surface']['default_squeeze'])
+    n_sq = s.steps(sq['steps']) if sq['steps'] else 0                   # steps 0: no squeeze
+    n_hold = s.steps(sq['hold_steps']) if n_sq and sq['hold_steps'] else 0
+    z = pos[:, 2]
+    edges = np.arange(z.min(), z.max() + 1.0, 1.0)
+    hist, _ = np.histogram(z, bins=edges)
+    w = min(len(hist), max(1, int(round(box[2]))))
+    dense_lo = edges[int(np.argmax(np.convolve(hist, np.ones(w), 'valid')))]
+    zc, half = dense_lo + box[2] / 2, sq['target_factor'] * box[2] / 2
+    zb0, zt0 = (z.min() - 0.5) * 0.1, (z.max() + 0.5) * 0.1            # nm
+    zb1, zt1 = (zc - half) * 0.1, (zc + half) * 0.1
+    kw = sq['k_kcal_A2'] * T.KCAL * 100                                 # kJ/mol/nm^2
+    walls = mm.CustomExternalForce('kw*(step(z-zt)*(z-zt)^2 + step(zb-z)*(zb-z)^2)')
+    walls.addGlobalParameter('kw', kw if n_sq + n_hold else 0.0)
+    walls.addGlobalParameter('zb', zb0)
+    walls.addGlobalParameter('zt', zt0)
+    for i in range(system.getNumParticles()):
+        walls.addParticle(i, [])
+    walls.setForceGroup(31)
+    system.addForce(walls)
+
     added, _ = T.configure(system, shake=c['shake'])
     kind, ta, tb, n = c['stages'][0]
     integ = integrator(ta, c['dt_fs'], cfg['default_friction_per_ps'])
@@ -265,19 +293,63 @@ def stage_surface(cfg, runs):
     ctx.applyConstraints(1e-6)
     ctx.setVelocitiesToTemperature(ta * u.kelvin, 2027)
     n = s.steps(n)
-    log = T.Log(s.dir / 'log.csv', ['step', 'time_ps', 'T_target_K', 'T_K', 'PE_kcal', 'z_min_A', 'z_max_A'])
+    log = T.Log(s.dir / 'log.csv', ['step', 'time_ps', 'phase', 'T_target_K', 'T_K', 'PE_kcal', 'z_min_A', 'z_max_A',
+                                    'wall_bottom_A', 'wall_top_A', 'wall_pressure_MPa'])
     dof = T.degrees_of_freedom(system)
+    to_MPa = 1.0 / (box[0] * box[1] * 1e-20 * AVOGADRO / 1000 * 1e-9) / 1e6   # kJ/mol/nm -> MPa
+
+    def row(k, phase, t_target, zb=None, zt=None):
+        st = ctx.getState(getEnergy=True, getPositions=True)
+        z = T.positions_A(st)[:, 2]
+        walled = zb is not None
+        f = 0.0
+        if walled:
+            # The film's push on the walls, mean of bottom and top (kJ/mol/nm).
+            zn = z * 0.1
+            f = kw * ((zn[zn > zt] - zt).sum() + (zb - zn[zn < zb]).sum())
+        log.row(k, k * c['dt_fs'] / 1000, phase, round(t_target, 2), round(T.temperature(ctx, system, dof), 2),
+                round(st.getPotentialEnergy().value_in_unit(u.kilocalorie_per_mole), 3), round(z.min(), 3),
+                round(z.max(), 3), round(zb * 10, 3) if walled else '', round(zt * 10, 3) if walled else '',
+                round(f * to_MPa, 3) if walled else '')
+
+    span = {'span_unwrapped_A': float(zmax - zmin)}
+    if n_sq + n_hold:
+        s.say(f'squeeze: dense layer {dense_lo:.1f}-{dense_lo + box[2]:.1f} A; walls {zb0 * 10:.1f}/{zt0 * 10:.1f} -> '
+              f'{zb1 * 10:.1f}/{zt1 * 10:.1f} A ({2 * half:.1f} A) over {n_sq} steps, held {n_hold}, at {ta} K')
+        every = 100
+        for k in range(0, n_sq, every):
+            integ.step(min(every, n_sq - k))
+            done = min(k + every, n_sq)
+            zb, zt = zb0 + (zb1 - zb0) * done / n_sq, zt0 + (zt1 - zt0) * done / n_sq
+            ctx.setParameter('zb', zb)
+            ctx.setParameter('zt', zt)
+            if done % 1000 == 0 or done == n_sq:
+                row(done, 'squeeze', ta, zb, zt)
+        ctx.setParameter('zb', zb1)
+        ctx.setParameter('zt', zt1)
+        for k in range(0, n_hold, 1000):
+            integ.step(min(1000, n_hold - k))
+            row(n_sq + min(k + 1000, n_hold), 'hold', ta, zb1, zt1)
+        z = T.positions_A(ctx.getState(getPositions=True))[:, 2]
+        span['span_after_squeeze_A'] = float(z.max() - z.min())
+        s.say(f'squeezed: film spans {span["span_after_squeeze_A"]:.1f} A; walls off')
+    ctx.setParameter('kw', 0.0)       # the walls are not part of what is written
+    base = n_sq + n_hold
 
     def report(k):
         if k % 1000 and k != n:
             return
-        st = ctx.getState(getEnergy=True, getPositions=True)
-        z = T.positions_A(st)[:, 2]
-        log.row(k, k * c['dt_fs'] / 1000, round(ta + (tb - ta) * k / n, 2), round(T.temperature(ctx, system, dof), 2),
-                round(st.getPotentialEnergy().value_in_unit(u.kilocalorie_per_mole), 3), round(z.min(), 3), round(z.max(), 3))
+        row(base + k, 'ramp', ta + (tb - ta) * k / n)
     T.run_ramp(integ, n, ta, tb, chunk=1000, on_chunk=report)
     log.close()
-    finish(s, ctx, system, str(build) + '.data', str(build) + '.in.styles', extra={'steps': n})
+    z = T.positions_A(ctx.getState(getPositions=True))[:, 2]
+    span['span_final_A'] = float(z.max() - z.min())
+    if span['span_final_A'] > 1.5 * box[2]:
+        s.say(f'WARNING: the film spans {span["span_final_A"]:.1f} A, {span["span_final_A"] / box[2]:.2f} x the bulk '
+              f'Lz; chains still stick out of it (see log.csv)')
+    finish(s, ctx, system, str(build) + '.data', str(build) + '.in.styles',
+           extra={'steps': n, 'squeeze_steps': n_sq, 'squeeze_hold_steps': n_hold,
+                  'squeeze_target_A': float(2 * half), **span})
 
 
 # --- 04 assemble: PAVES combines silica supercell + polymer slab ----------------

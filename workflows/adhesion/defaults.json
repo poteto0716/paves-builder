@@ -43,6 +43,12 @@
   "dt_fs": 1.0,
   "shake": true,
   "default_vacuum_A": 60.0,
+  "default_squeeze": {
+   "steps": 300000,
+   "hold_steps": 100000,
+   "target_factor": 1.1,
+   "k_kcal_A2": 10.0
+  },
   "stages": [
    [
     "ramp",
