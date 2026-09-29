@@ -1,0 +1,10 @@
+polypaves-build 1
+# Fixed integer lengths are normalized to fractions, then resized automatically.
+name          pmma_block_ps
+monomer       A '*CC(C)(C(=O)OC)*'
+monomer       B '*CC(c1ccccc1)*'
+terminator    '*C'
+architecture  blocks
+block         A 50
+block         B 50
+chains        10

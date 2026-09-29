@@ -44,6 +44,20 @@ python adhesion.py new pmma --monomer '*CC(C)(C(=O)OC)*' --dp 200 --chains 20
 python adhesion.py run projects/pmma            # 中断しても同じコマンドで続きから
 ```
 
+## 熱物性・引張弾性ワークフロー
+
+高分子SMILESと原子数目標から、PCFF/OpenMMによる4独立系の800→200 K NPT冷却、
+**密度–温度曲線**の双曲線フィットによるTgと線膨張係数、300 K構造の2%引張による
+引張弾性率までを実行するワークフローを
+[`workflows/thermomechanical/`](workflows/thermomechanical/README.md) に収録しています。
+
+```bash
+cd workflows/thermomechanical
+python thermomechanical.py new pmma --monomer '*CC(C)(C(=O)OC)*' \
+  --atoms-per-chain 1000 --total-atoms 20000
+python thermomechanical.py run projects/pmma
+```
+
 ## 最初の分子系
 
 ```python

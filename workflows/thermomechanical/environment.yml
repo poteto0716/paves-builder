@@ -1,0 +1,14 @@
+# Runtime environment for the thermomechanical workflow.
+#   conda env create -f workflows/thermomechanical/environment.yml
+#   conda activate polypaves-thermomechanical
+#   pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
+name: polypaves-thermomechanical
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - openmm>=8.2
+  - cuda-version>=12,<13
+  - numpy
+  - scipy
+  - pip

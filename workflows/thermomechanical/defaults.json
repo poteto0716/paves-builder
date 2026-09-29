@@ -1,0 +1,51 @@
+{
+ "_comment": "Production defaults. Values ending in _ns define physical time; --test replaces step counts only and is not a physical calculation.",
+ "forcefield": "@builder/examples/forcefields/pcff.ff",
+ "platform": "auto",
+ "precision": "mixed",
+ "replicates": 4,
+ "base_seed": 20260929,
+ "system": {
+  "terminator": "*C",
+  "target_atoms_per_chain": null,
+  "target_total_atoms": null,
+  "initial_density_g_cm3": 0.5,
+  "minimum_image_density_g_cm3": 1.5,
+  "build_temperature_K": 800.0
+ },
+ "md": {
+  "dt_fs": 1.0,
+  "shake_hydrogen": true,
+  "friction_per_ps": 1.0,
+  "pressure_atm": 1.0,
+  "barostat_every_steps": 25
+ },
+ "cooling": {
+  "temperature_start_K": 800.0,
+  "temperature_end_K": 200.0,
+  "rate_K_per_ns": 40.0,
+  "equilibrate_ns": 1.0,
+  "temperature_update_steps": 1000,
+  "sample_every_steps": 10000,
+  "prerelax_steps": 20000,
+  "prerelax_dt_fs": 1.0,
+  "prerelax_friction_per_ps": 10.0,
+  "prerelax_max_step_A": 0.1,
+  "fit_bin_width_K": 10.0
+ },
+ "elastic": {
+  "temperature_K": 300.0,
+  "duration_ns": 20.0,
+  "max_strain": 0.02,
+  "equilibrate_ns": 0.5,
+  "axes": [
+   "x"
+  ],
+  "deform_every_steps": 1000,
+  "sample_every_steps": 10000,
+  "stress_delta": 0.0001,
+  "fit_min_strain": 0.0,
+  "fit_max_strain": 0.02
+ },
+ "test_mode": false
+}

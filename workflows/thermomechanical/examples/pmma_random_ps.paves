@@ -1,0 +1,13 @@
+polypaves-build 1
+# PMMA/styrene random-exact copolymer. degree/chains are intentionally examples:
+# thermomechanical.py replaces them from --atoms-per-chain/--total-atoms.
+name          pmma_random_ps
+sequence_seed 11
+monomer       A '*CC(C)(C(=O)OC)*'
+monomer       B '*CC(c1ccccc1)*'
+terminator    '*C'
+architecture  random-exact
+block         A fraction 0.7
+block         B fraction 0.3
+degree        100
+chains        10
