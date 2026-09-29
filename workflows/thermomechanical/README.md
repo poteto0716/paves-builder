@@ -134,6 +134,7 @@ python thermomechanical.py run projects/smoke
 |---|---:|
 | replica | 4 |
 | 力場 / MD | PCFF / OpenMM |
+| 9-6分散の長距離補正 | 解析的tail補正あり |
 | 初期密度 | 0.5 g/cm³ |
 | タイムステップ | 1 fs（X–H SHAKE） |
 | 圧力 | 1 atm |

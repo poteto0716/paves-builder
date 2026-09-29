@@ -6,6 +6,14 @@ from thermomechanical import chemistry_from_file, normalize_block_counts, parse_
 
 
 class ChemistryInputTest(unittest.TestCase):
+    def test_bulk_pcff_enables_tail_correction_but_adhesion_fields_do_not(self):
+        root = Path(__file__).resolve().parents[2]
+        fields = root / 'examples' / 'forcefields'
+        bulk = (fields / 'pcff.ff').read_text()
+        self.assertRegex(bulk, r'(?m)^pair_modify\s+mix\s+sixthpower\s+tail\s+yes\s*$')
+        for name in ('pcff_iff_long_bulk.ff', 'pcff_iff_long_bulk_mod.ff'):
+            self.assertNotRegex((fields / name).read_text(), r'(?m)\btail\s+yes\b')
+
     def test_fixed_blocks_are_normalized_for_automatic_dp(self):
         lines = normalize_block_counts(['block A 70', 'block B 30'])
         self.assertEqual(lines, ['block         A fraction 0.7',
