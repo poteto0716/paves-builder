@@ -1,8 +1,8 @@
 # PAVES
 
-**Polymer Automation for Virtual Evaluation and Simulation**
+**Pipeline for Automated Virtual Experiments and Screening**
 
-*Pave the way from polymer chemistry to simulation.*
+*Pave the way from polymer structure to properties.*
 
 PAVES is a Python package that constructs molecular-dynamics systems from
 monomer SMILES and composition specifications. It calls a C++ engine directly

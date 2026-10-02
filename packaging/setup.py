@@ -85,7 +85,7 @@ extensions = cythonize(
 setup(
     name="polypaves",
     version=version,
-    description="PAVES: Polymer Automation for Virtual Evaluation and Simulation",
+    description="PAVES: Pipeline for Automated Virtual Experiments and Screening",
     python_requires=">=3.10",
     packages=find_packages(),
     package_data={"polypaves": ["_native*.so"]},
