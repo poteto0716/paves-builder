@@ -140,6 +140,9 @@ OVITO で `final.data` を LAMMPS data（atom style `full`）として開き、*
 
 #### ブラウザ（Jupyter）で OVITO を使う
 
+[Docker Composeの起動手順](../../docs/docker.md)を使うと、PAVES・OVITO・Jupyterを
+まとめて準備し、このノートブックをブラウザで開けます。
+
 `ovito_view.ipynb` は、上と同じパイプライン（`final.data` ＋ Load trajectory）を Jupyter の
 中の OVITO ビューポートで表示します。マウスで回転・ズームでき、フレームはスライダーで選びます。
 

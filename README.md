@@ -122,6 +122,23 @@ These workflows use the **0.4.0 CPython 3.11 wheel** and the
 scripts call compiled PAVES APIs; engine and API implementation source is absent.
 Fixed solvent loading is an initial condition, not a verified equilibrium uptake.
 
+## Docker Compose and OVITO Jupyter
+
+The [Docker Compose setup](docs/docker.md) starts JupyterLab with PAVES, OpenFF,
+OpenMM, MDTraj, and OVITO already installed. It opens the existing adhesion
+visualization notebook and saves edits and simulation results to this checkout.
+CPU execution is supported; an additional Compose file enables NVIDIA GPU access.
+
+```bash
+export PAVES_UID=$(id -u)
+export PAVES_GID=$(id -g)
+docker compose up -d --build
+docker compose logs jupyter
+```
+
+Open the token-bearing localhost URL in the logs. The image installs the public
+wheel and does not require the private PAVES implementation source.
+
 ## Binary distribution and implementation privacy
 
 The wheel contains the simulation engine and high-level API as stripped native

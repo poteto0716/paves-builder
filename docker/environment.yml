@@ -1,0 +1,30 @@
+name: base
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openff-toolkit>=0.18,<0.19
+  - openff-interchange>=0.5,<0.6
+  - openff-forcefields
+  - openff-nagl
+  - openff-nagl-models
+  # Charge inference runs on CPU; OpenMM can still use the NVIDIA GPU.
+  - pytorch=*=cpu*
+  - jaxlib=*=cpu*
+  - openmm>=8.2,<9
+  - cuda-version>=12,<13
+  - rdkit
+  - numpy
+  - scipy
+  # Use the headless distribution so conda does not install a second Qt/PySide6.
+  - matplotlib-base
+  - pymbar>=4,<5
+  - pyyaml
+  - mdtraj
+  - jupyterlab>=4,<5
+  - jupyter_server>=2,<3
+  # The existing OVITO widget must execute its Qt callbacks on the main thread.
+  - ipykernel>=6.29,<7
+  - ipywidgets>=8,<9
+  - nbclient
+  - pip
