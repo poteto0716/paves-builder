@@ -1,0 +1,43 @@
+# MD開始前に使う初期化ルールの一覧。詳しい書式は YAML_GUIDE.md を参照。
+# このファイルにはモノマーSMILES、packing条件、GPU設定は書かない。
+activations:
+  - name: neutral_ring_opening_seed
+    # C-O-C三員環を検索。:1/:2/:3 はこのルール内の原子ラベル。
+    # +0 = formal charge 0、X2 = Hを含む結合相手が2個。
+    target_smarts: "[C:1]1[O;+0;X2:2][C:3]1"
+    # 開環後のOH酸素（map 2）へ、力場とは独立したmetadataを付ける。
+    active_atom_map: 2
+    reaction_state_to_assign: cationic_activity
+    # null は「reaction_stateなし」を要求する。未初期化の環だけ選ぶ。
+    required_atom_states: {2: null}
+    # 対象は分子数ではなく、条件に一致したepoxide官能基数。
+    # floor(対象数 * 0.10) 個をseedに従ってランダム選択。
+    # 個数指定にするなら selection: count / count: 1 にし、fractionを削除。
+    # crosslinking.py は開始点のCLI指定を省略すると、この割合を使う。
+    selection: fraction
+    fraction: 0.10
+    seed: 31415
+    # 新しいHを2個追加する。map 4/5 は既存mapと重複させない。
+    # positionのdistanceはangstrom。向きは既存原子間のPBC最短方向。
+    atoms_to_add:
+      - atom_map: 4
+        element: H
+        # 切断側C1を、元のO2方向に1.09 ÅのC-Hでcap。
+        position: {relative_to: 1, towards: 2, distance: 1.09}
+      - atom_map: 5
+        element: H
+        # O2を、元のC1方向に0.97 ÅのO-Hでcap。
+        position: {relative_to: 2, towards: 1, distance: 0.97}
+    # 結合の書式は [atom_map_1, atom_map_2, order]。1は単結合。
+    bonds_to_remove: [[1, 2, 1]]
+    bonds_to_add: [[1, 4, 1], [2, 5, 1]]
+    require_explicit_hydrogens: true
+    # 選択した1サイトあたりのformal charge変化とstate数変化を検証。
+    # 初期化はactivityを1個作る。成長ルールでは0（保存）を指定する。
+    expected_total_charge_delta: 0
+    expected_atom_state_deltas: {cationic_activity: 1}
+    # 記録用の説明。これを書くだけでSageが選択されるわけではない。
+    metadata:
+      representation: neutral_proxy
+      mechanism: effective_initiation
+      forcefield_assumption: stock_sage_neutral_species_only

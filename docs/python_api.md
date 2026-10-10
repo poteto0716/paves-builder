@@ -80,6 +80,29 @@ system = polypaves.pack(
 オブジェクトで、結晶面自体を生成する API ではありません。スラブは counts・比率の
 対象外ですが、`total_atoms` にはスラブ原子も含まれます。
 
+## 保存電荷を保持したネットワークへの溶媒追加
+
+```python
+from polypaves import Solvent, make_solvent, pack_network
+
+packed = pack_network("final.structure.json", Solvent("O", name="water"), count=100,
+                      cell_scale=1.1, seed=31415)
+packed.save("water_100")
+```
+
+樹脂の保存電荷・結合・原子IDを保持し、溶媒だけをSage 2.3.0で自動割り当てします。
+同一化学構造の分子が複数あっても、原子ごとの保存電荷を保持します。
+`cell_scale`の既定値は1で、変更時はセルと樹脂座標を同じ倍率で拡張します。
+周期像との重なりを検査し、指定数を配置できなければ例外を返します。
+`packed.positions_nm`と`packed.box_nm`はnm、保存する構造JSONはÅです。
+`make_solvent(Solvent("CC(=O)C"))`なら溶媒テンプレートだけを生成できます。
+対象はSageが扱える1つの中性分子です。pack結果は初期配置で、平衡吸収率ではありません。
+MDとcheckpointの使い方は[吸水ワークフロー](../workflows/sorption/README.md)に記載しています。
+
+架橋構築には`polypaves.reaction`の`ActivationInitializer`、`LocalSageForceField`、
+`ReactiveMDRunner`、`MDStage`等を利用できます。
+[実行例](../workflows/crosslinking/README.md)はこれらの公開APIを呼びます。
+
 ## System
 
 主な属性とメソッド:

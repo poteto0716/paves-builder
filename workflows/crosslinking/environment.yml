@@ -1,0 +1,18 @@
+name: paves-reactive
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - openff-toolkit>=0.18
+  - openff-interchange>=0.5
+  - openff-forcefields
+  - openff-nagl
+  - openff-nagl-models
+  - openmm>=8.1
+  - rdkit
+  - numpy
+  - scipy
+  - matplotlib
+  - pymbar>=4,<5
+  - pyyaml
+  - pip

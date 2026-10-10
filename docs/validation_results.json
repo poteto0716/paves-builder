@@ -1,22 +1,70 @@
 {
-  "artifact": "dist/polyse-0.1.0-cp313-cp313-linux_x86_64.whl",
-  "platform": "Linux x86_64",
-  "python_abi": "cp313",
-  "source_files_in_wheel": false,
-  "native_extensions": [
-    "polyse/api.cpython-313-x86_64-linux-gnu.so",
-    "polyse/_native.cpython-313-x86_64-linux-gnu.so"
+  "version": "0.4.0",
+  "validation_date": "2026-10-11",
+  "platform": "Ubuntu 24.04 x86_64",
+  "artifacts": [
+    {
+      "artifact": "dist/polypaves-0.4.0-cp311-cp311-linux_x86_64.whl",
+      "python_abi": "cp311",
+      "sha256": "756c45fad90734ba071e5887910b602311b7d058fbe34cd6f36baa10eaf33bcc",
+      "compiled_extension_count": 53,
+      "public_facades": [
+        "polypaves/__init__.py",
+        "polypaves/reaction/__init__.py"
+      ],
+      "implementation_source_files_in_wheel": false,
+      "checks": {
+        "wheel_source_audit": true,
+        "elf_stripped": true,
+        "python_init_only_exports": true,
+        "no_private_build_paths": true,
+        "no_rpath_or_runpath": true,
+        "installed_wheel_import": true
+      }
+    },
+    {
+      "artifact": "dist/polypaves-0.4.0-cp313-cp313-linux_x86_64.whl",
+      "python_abi": "cp313",
+      "sha256": "19010689c11d2f94d3714291cf902610fd580cf3d37813b060cc985a9120c4bc",
+      "compiled_extension_count": 53,
+      "public_facades": [
+        "polypaves/__init__.py",
+        "polypaves/reaction/__init__.py"
+      ],
+      "implementation_source_files_in_wheel": false,
+      "checks": {
+        "wheel_source_audit": true,
+        "elf_stripped": true,
+        "python_init_only_exports": true,
+        "no_private_build_paths": true,
+        "no_rpath_or_runpath": true,
+        "installed_wheel_import": true
+      }
+    }
   ],
   "checks": {
-    "fresh_venv_import": true,
-    "system_api_smoke": true,
-    "example_syntax_files": 12,
-    "examples_executed": 12,
-    "wheel_source_audit": true,
-    "elf_stripped": true,
-    "python_init_only_exports": true,
-    "no_private_build_paths": true,
-    "no_rpath_or_runpath": true,
-    "distribution_checksums": true
-  }
+    "public_workflow_tests_passed": 4,
+    "nested_implementation_source_rejected": true,
+    "implementation_loaded_from_compiled_extensions": true,
+    "identical_molecules_keep_distinct_saved_charges": true,
+    "network_charge_assignment_not_called": true,
+    "cp311_actual_crosslink_reaction": true,
+    "cp311_exact_water_molecule_count": true,
+    "cp311_saved_host_graphs_and_charges_retained": true,
+    "cp311_cpu_nvt_npt_and_frames": true,
+    "cp311_completed_checkpoint_resume": true,
+    "cp313_native_pack": {
+      "atoms": 16,
+      "bonds": 14,
+      "lammps_export": true
+    },
+    "public_python_syntax_files": 5,
+    "shell_syntax": true
+  },
+  "limitations": [
+    "Crosslinking and OpenFF-dependent sorption were tested with CPython 3.11.",
+    "CPython 3.13 was tested for import, native packing, and LAMMPS export.",
+    "Short CPU dynamics verify the workflow, not physical convergence.",
+    "Fixed solvent loading does not establish equilibrium water uptake."
+  ]
 }

@@ -19,13 +19,14 @@ the terms of use.
 
 ## Supported platform and installation
 
-The bundled wheel is validated on **Ubuntu 24.04 x86_64 with CPython 3.13**.
-It cannot be installed with a different Python ABI or on another platform.
+The bundled wheels target **Ubuntu 24.04 x86_64** with **CPython 3.11 or 3.13**.
+Use Python 3.11 for the OpenFF crosslinking and sorption workflows. Each wheel
+requires its matching Python ABI and cannot be installed on another platform.
 
 ```bash
 git clone <repository-url> polypaves
 cd polypaves
-python3 -m pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
+python3 -m pip install dist/polypaves-0.4.0-cp313-cp313-linux_x86_64.whl
 python3 -c 'import polypaves; print(polypaves.__version__)'
 sha256sum -c SHA256SUMS
 ```
@@ -103,6 +104,23 @@ python examples/01_pcff_polystyrene/pmma_dp10/build.py
 Generated files are written below each example's `output/` directory and are
 ignored by Git. See [external data](docs/external_data.md) for force-field
 provenance and [binary validation](docs/validation.md) for the validation scope.
+
+## Crosslinking and water sorption
+
+The binary distribution includes reaction SMARTS, periodic network MD,
+saved-charge network loading, automatic Sage solvent assignment, periodic solvent
+packing, and fixed-loading NVT/NPT simulation with checkpoint resume.
+
+- [Crosslinked epoxy construction](workflows/crosslinking/README.md): monomer
+  SMILES, activation rules, reaction/MD cycles, charged MOL2 and structure JSON.
+- [Water and other solvent simulations](workflows/sorption/README.md): retain the
+  network's saved charges, specify `Solvent("SMILES")`, pack a molecule count,
+  and relax/sample the wet network.
+
+These workflows use the **0.4.0 CPython 3.11 wheel** and the
+[OpenFF environment](workflows/crosslinking/environment.yml). The public workflow
+scripts call compiled PAVES APIs; engine and API implementation source is absent.
+Fixed solvent loading is an initial condition, not a verified equilibrium uptake.
 
 ## Binary distribution and implementation privacy
 

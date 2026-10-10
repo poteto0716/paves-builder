@@ -16,12 +16,15 @@
 - object/static library、ビルドツリー、compile database
 - debug symbol、開発ログ、私有パス、ソース管理情報
 
-wheel には `polypaves._native` と `polypaves.api` の2つの strip 済み拡張を収録します。
-`polypaves/__init__.py` は公開 API 名を再 export する短い facade だけです。`api.py`、
-生成 C、C++ ソースは wheel に含めません。ビルド時のパスはコンパイラの prefix-map
+wheelには`polypaves._native`と高水準APIのstrip済み拡張を収録します。
+reactionのサブパッケージ、溶媒pack、MD、自由エネルギー、解析もコンパイルします。
+`polypaves/__init__.py`と`polypaves/reaction/__init__.py`は公開API名を再exportする
+facadeだけです。それ以外のPython実装、生成C、C++ソースはwheelに含めません。
+ビルド時のパスはコンパイラのprefix-map
 で除去し、ELF の debug section、通常の symbol table、RPATH/RUNPATH を検査します。
-動的シンボルは Python がロードに必要とする `PyInit_api` / `PyInit__native` だけを
-公開し、C++ エンジンのクラス名・関数名は export しません。
+動的シンボルは各モジュールをPythonがロードするための`PyInit_*`だけを公開し、
+C++エンジンのクラス名・関数名はexportしません。監査はサブディレクトリも含めて行います。
+再配布できないAMOEBA09のパラメータは公開用native buildで無効にします。
 
 ## 限界
 

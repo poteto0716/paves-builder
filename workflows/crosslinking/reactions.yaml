@@ -1,0 +1,46 @@
+# 成長反応の定義。詳しい書式は YAML_GUIDE.md を参照。
+# top-levelのselection/seedを有効にするにはPython側でrunnerへ渡す。
+selection: nearest
+seed: 31415
+reactions:
+  - name: epoxy_OH_relay
+    # リスト順は0: OH、1: epoxide。SMARTSは必ず引用符で囲む。
+    # map 1=旧OH酸素、2=攻撃C、3=epoxide酸素、4=他方C、5=既存H。
+    reactants:
+      - "[O;+0;X2:1]-[#1:5]"
+      - "[C:2]1[O;+0;X2:3][C:4]1"
+    # 反応する局所断片。マッチ範囲外の置換基・鎖・結合は保持される。
+    # O1-H5/C2-O3を切り、O1-C2/O3-H5を作る。H5を追加しない。
+    products:
+      - "[O;+0:1]-[C:2]-[C:4]-[O;+0:3]-[#1:5]"
+    # 現在のMD座標で距離を測る原子ペア。全編集原子の一覧ではない。
+    reactive_atom_maps: [1, 2]
+    # OHにactivityがあり、epoxideにstateがない場合だけ候補にする。
+    required_atom_states:
+      1: cationic_activity
+      3: null
+    # 旧OHから新OHへactivityを移す。nullはstateを解除する。
+    product_atom_states:
+      1: null
+      3: cationic_activity
+    require_explicit_hydrogens: true
+    # angstrom。crosslinking.pyは5 Åから開始し、0件が2 cycle続くと1.2倍、最大10 Å。
+    # 自動拡大はPython側の設定。距離は反応障壁から求めた値ではない。
+    distance_cutoff: 5.0
+    # 現在同じconnected component内の反応も許す（分岐・閉ループ）。
+    allow_intramolecular: true
+    # 同じcomponent内では距離アンカー間に少なくとも4結合必要。
+    minimum_graph_separation: 4
+    # このルールの1cycleあたり上限。runnerの全体上限も同時に適用される。
+    max_reactions_per_cycle: 1
+    # formal chargeを保存。partial chargeは反応後にSageが再割り当てする。
+    expected_total_charge_delta: 0
+    # 1反応あたりactivity数の変化0。履歴へ前後の数を記録する。
+    expected_atom_state_deltas: {cationic_activity: 0}
+    metadata:
+      mechanism: effective_epoxy_OH_relay
+      representation: neutral_proxy
+      active_state: cationic_activity
+      forcefield_assumption: stock_sage_neutral_species_only
+      # これは集計用設定。0始まりでreactants[1]のepoxide消費をconversionに使う。
+      conversion_reactant: 1

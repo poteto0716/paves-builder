@@ -26,7 +26,7 @@ unzip -q "$WHEEL" -d "$STAGE"
 mapfile -t MEMBERS < <(unzip -Z1 "$WHEEL")
 for member in "${MEMBERS[@]}"; do
     case "$member" in
-        polypaves/__init__.py|*.so|*.dist-info/*) ;;
+        polypaves/__init__.py|polypaves/reaction/__init__.py|*.so|*.dist-info/*) ;;
         *.py|*.pyi|*.pyx|*.pxd|*.c|*.cc|*.cpp|*.h|*.hh|*.hpp|*.o|*.a|*.debug)
             echo "source or development artifact found in wheel: $member" >&2
             exit 1
@@ -34,7 +34,7 @@ for member in "${MEMBERS[@]}"; do
     esac
 done
 
-mapfile -t EXTENSIONS < <(find "$STAGE/polypaves" -maxdepth 1 -type f -name '*.so' -print | sort)
+mapfile -t EXTENSIONS < <(find "$STAGE/polypaves" -type f -name '*.so' -print | sort)
 [[ ${#EXTENSIONS[@]} -ge 2 ]] || {
     echo "expected the native engine and compiled modules, found ${#EXTENSIONS[@]} extensions" >&2
     exit 1

@@ -18,10 +18,21 @@ __all__ = [
     "from_file", "DEFAULT_SAGE_VERSION", "ChargeConfig", "FragmentConfig",
     "SageForceField", "SageCompatibilityError", "OpenFFDependencyError", "OpenMMBackend",
     "load_structure", "write_topology", "PCFFForceField", "GAFF2ForceField",
+    "ReactionRule", "ReactionEngine", "ReactiveMDRunner", "ReactionGraph",
+    "make_solvent", "pack_network", "PackedNetwork", "configure_logging",
 ]
 
 
 def __getattr__(name):
+    if name in ('make_solvent', 'pack_network', 'PackedNetwork'):
+        from . import sorption
+        return getattr(sorption, name)
+    if name in ('ReactionRule', 'ReactionEngine', 'ReactiveMDRunner', 'ReactionGraph'):
+        from . import reaction
+        return getattr(reaction, name)
+    if name == 'configure_logging':
+        from .progress import configure_logging
+        return configure_logging
     if name == "GAFF2ForceField":
         from .gaff2 import GAFF2ForceField
         return GAFF2ForceField

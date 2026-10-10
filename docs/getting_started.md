@@ -2,10 +2,10 @@
 
 ## 1. インストール
 
-Ubuntu 24.04 x86_64 と CPython 3.13 を使用します。リポジトリのルートで:
+Ubuntu 24.04 x86_64とCPython 3.13を使用する場合、リポジトリのルートで:
 
 ```bash
-python3 -m pip install dist/polypaves-0.3.0-cp313-cp313-linux_x86_64.whl
+python3 -m pip install dist/polypaves-0.4.0-cp313-cp313-linux_x86_64.whl
 python3 - <<'PY'
 import polypaves
 print(polypaves.__version__)
@@ -14,6 +14,10 @@ PY
 
 仮想環境を使う場合も、その仮想環境の Python が CPython 3.13 である必要があります。
 `not a supported wheel on this platform` は Python ABI、OS、CPU のいずれかが不一致です。
+
+OpenFFを使う架橋構築と吸水計算には、CPython 3.11のwheelを使います。
+環境とコマンドは[架橋構築](../workflows/crosslinking/README.md)と
+[溶媒pack・MD](../workflows/sorption/README.md)を参照してください。
 
 ## 2. 最初の実行
 

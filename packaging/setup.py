@@ -12,7 +12,7 @@ from setuptools.command.build_py import build_py
 
 
 root = Path(__file__).resolve().parent
-version = os.environ.get("POLYPAVES_VERSION", "0.3.0")
+version = os.environ.get("POLYPAVES_VERSION", "0.4.0")
 
 
 class StrippedBuildExt(build_ext):
@@ -43,26 +43,30 @@ class StrippedBuildExt(build_ext):
                 )
 
     def build_extensions(self):
+        self.parallel = int(os.environ.get("POLYPAVES_BUILD_JOBS", "3"))
         self.compiler.compiler_so = self._portable_command(self.compiler.compiler_so)
         self.compiler.linker_so = self._portable_command(self.compiler.linker_so)
         super().build_extensions()
 
 
 # Every module of the package except the facade is compiled; none ships as source.
-COMPILED = sorted(path.stem for path in (root / "polypaves").glob("*.py") if path.stem != "__init__")
+COMPILED = {
+    '.'.join(path.relative_to(root).with_suffix('').parts): path.relative_to(root).as_posix()
+    for path in (root / "polypaves").rglob("*.py") if path.name != "__init__.py"
+}
 
 
 class PublicBuildPy(build_py):
     def find_package_modules(self, package, package_dir):
         modules = super().find_package_modules(package, package_dir)
-        return [module for module in modules if module[1] not in COMPILED]
+        return [module for module in modules if f'{module[0]}.{module[1]}' not in COMPILED]
 
 
 extensions = cythonize(
     [
         Extension(
-            f"polypaves.{name}",
-            [f"polypaves/{name}.py"],
+            name,
+            [source],
             extra_compile_args=[
                 "-O3",
                 "-fvisibility=hidden",
@@ -70,7 +74,7 @@ extensions = cythonize(
                 f"-fdebug-prefix-map={root}=.",
             ],
         )
-        for name in COMPILED
+        for name, source in sorted(COMPILED.items())
     ],
     compiler_directives={
         "binding": True,
@@ -94,5 +98,10 @@ setup(
     cmdclass={"build_ext": StrippedBuildExt, "build_py": PublicBuildPy},
     zip_safe=False,
     # `polypaves-build INPUT.paves [key=value ...]`: the file-driven builder, from the compiled cli module.
-    entry_points={"console_scripts": ["polypaves-build = polypaves.cli:main"]},
+    entry_points={"console_scripts": ["polypaves-build = polypaves.cli:main", "paves = polypaves.cli:paves_main"]},
+    extras_require={
+        'reactions': ['numpy>=1.24', 'rdkit>=2023.9', 'openmm>=8.1', 'PyYAML>=6'],
+        'sorption': ['numpy>=1.24', 'rdkit>=2023.9', 'openmm>=8.1', 'PyYAML>=6',
+                     'scipy>=1.10', 'matplotlib>=3.7', 'pymbar>=4,<5'],
+    },
 )
