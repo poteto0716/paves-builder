@@ -15,7 +15,7 @@ formal charge、radical、OpenFF partial chargeを意味しません。
 |---|---|---|
 | [activation.yaml](activation.yaml) | MD前に開始点を作る方法、対象官能基、開始点数／割合、追加原子、結合編集、state付与 | epoxideを1本開環し、CとOをHでcapしてOH*を作る |
 | [reactions.yaml](reactions.yaml) | MD中に繰り返す反応、反応前後のSMARTS、state条件、距離条件、反応上限 | OH*が次のepoxideを開環し、activityを新OHへ移す |
-| [crosslinking.py](crosslinking.py) | モノマーSMILES・総原子数・密度、Sageバージョン、初期NPT・cycle NVT/NPT、CUDA、出力先 | 3官能モノマー、4702原子目標、Sage 2.3.0、CUDA/mixed |
+| [crosslinking.py](crosslinking.py) | モノマーSMILES・総原子数・密度、Sageバージョン、初期NPT・cycle NVT/NPT、CUDA、出力先 | 3官能モノマー、20000原子超、目標反応率99.5%、最大5000 cycle、Sage 2.3.0、CUDA/mixed |
 
 library exampleは、実行時の**カレントディレクトリ**の `activation.yaml`／`reactions.yaml` を読みます。
 `--project 名前` で `results/名前/` に保存し、両YAMLもコピーします。
@@ -24,11 +24,12 @@ library exampleは、実行時の**カレントディレクトリ**の `activati
 例えば別のエポキシへ変更する場合、まずPythonの `p.Solvent(...)` のSMILESを変更します。
 反応させる官能基と反応前後の局所構造が同じなら、YAMLを変更せずに使える可能性があります。
 サイズは `--total-atoms`、密度は `--density`、SMILESは `--smiles`／`--smiles-file` で指定します。
-総原子数はHと開始点作成で追加するHを含み、分子単位でnearest/floor/exactを選びます。
+総原子数はHと開始点作成で追加するHを含み、分子単位でabove/nearest/floor/exactを選びます。
 初期緩和は `--equilibration-steps`／`--equilibration-timestep`、成長後のMDは
 `--nvt-steps`／`--nvt-timestep` と `--npt-steps`／`--npt-timestep` で指定します。
 初期NPT緩和の既定は300 K・1 atm、1 fs × 1,000,000 step（1 ns）です。
-OVITO軌跡と構造ファイルは各cycle終了時に1回保存し、集計JSONもcycleごとに更新します。
+OVITO軌跡とcycle別構造は既定では保存せず、`--save-trajectory`で有効にできます。
+有効時は各cycle終了時に1回保存します。反応履歴・集計JSON・最終構造はOFFでも保存します。
 これらをこの2つのYAMLへ追加すると、未対応の設定キーとしてエラーになります。
 
 なお、現在の短いlibrary exampleにはPython側の明示指定があります。

@@ -116,6 +116,12 @@ packing, and fixed-loading NVT/NPT simulation with checkpoint resume.
 - [Water and other solvent simulations](workflows/sorption/README.md): retain the
   network's saved charges, specify `Solvent("SMILES")`, pack a molecule count,
   and relax/sample the wet network.
+- [Crosslinked network properties](workflows/network_properties/README.md):
+  independent epoxy construction per replica, 800→100 K relaxation and Tg/CTE,
+  300 K thermodynamics, void fraction, elastic response and
+  thermal transport, followed by arbitrary neutral-solvent insertion free energies
+  and self diffusion, with sampling diagnostics, per-replica CSV summaries, and
+  local GPU job submission with explicit GPU indices and independent seeds.
 
 These workflows use the **0.4.0 CPython 3.11 wheel** and the
 [OpenFF environment](workflows/crosslinking/environment.yml). The public workflow
@@ -138,6 +144,13 @@ docker compose logs jupyter
 
 Open the token-bearing localhost URL in the logs. The image installs the public
 wheel and does not require the private PAVES implementation source.
+
+## Screening tools
+
+[`scripts/smiles_parameter_check.py`](docs/smiles_parameter_check.md) reads IDs
+and SMILES from CSV or XLSX, checks parameter assignment with PCFF, Sage, and/or
+GAFF2, and reports the charge sum of every dot-separated fragment. Failures are
+recorded per fragment without stopping the remaining batch.
 
 ## Binary distribution and implementation privacy
 

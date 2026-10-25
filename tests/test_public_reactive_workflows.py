@@ -27,6 +27,60 @@ class DistributionPolicyTests(unittest.TestCase):
             self.assertIn('source or development artifact', result.stderr)
 
 
+class CrosslinkingDefaultsTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('crosslinking_defaults',
+            ROOT / 'workflows/crosslinking/crosslinking.py')
+        cls.workflow = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.workflow)
+
+    def test_cli_and_python_defaults_and_overrides(self):
+        import inspect
+        defaults = dict(total_atoms=20000, atom_count_mode='above',
+                        cycles=5000, target_conversion=.995, save_trajectory=False)
+        signature = inspect.signature(self.workflow.run)
+        for name, value in defaults.items():
+            self.assertEqual(signature.parameters[name].default, value)
+        for flags, expected in [([], defaults),
+                (['--total-atoms', '500', '--atom-count-mode', 'nearest', '--cycles', '1',
+                  '--target-conversion', '.9', '--save-trajectory'],
+                 dict(total_atoms=500, atom_count_mode='nearest', cycles=1, target_conversion=.9,
+                      save_trajectory=True))]:
+            with patch.object(sys, 'argv', ['crosslinking.py', '--project', 'check', *flags]), \
+                 patch.object(self.workflow, 'run') as run, \
+                 patch.object(self.workflow.p, 'configure_logging'):
+                self.workflow.main()
+                for name, value in expected.items():
+                    self.assertEqual(run.call_args.kwargs[name], value)
+
+    def test_default_epoxy_exceeds_twenty_thousand_including_activation(self):
+        plan = self.workflow.plan_size(20000, 47, 3, added_per_site=2, fraction=.1)
+        self.assertEqual(plan['monomers'], 421)
+        self.assertEqual(plan['activation_count'], 126)
+        self.assertEqual(plan['actual_total_atoms'], 20039)
+
+    def test_above_is_strict_and_minimal_for_count_and_fraction(self):
+        import math
+        for target in (500, 4704, 19992, 20000, 20039):
+            for selection in ({'count': 2}, {'fraction': .1}):
+                with self.subTest(target=target, selection=selection):
+                    plan = self.workflow.plan_size(target, 47, 3, added_per_site=2, **selection)
+                    self.assertGreater(plan['actual_total_atoms'], target)
+                    previous = plan['monomers'] - 1
+                    starts = selection.get('count', math.floor(.1 * 3 * previous))
+                    self.assertLessEqual(47 * previous + 2 * starts, target)
+
+    def test_explicit_legacy_rounding_modes(self):
+        for mode in ('nearest', 'floor', 'exact'):
+            plan = self.workflow.plan_size(19992, 47, 3, added_per_site=2, fraction=.1, mode=mode)
+            self.assertEqual(plan['actual_total_atoms'], 19992)
+        with self.assertRaises(ValueError):
+            self.workflow.plan_size(20000, 47, 3, added_per_site=2, fraction=.1, mode='exact')
+        with self.assertRaises(ValueError):
+            self.workflow.plan_size(20000, 47, 3, added_per_site=2, fraction=.1, mode='invalid')
+
+
 class PublicReactiveWorkflows(unittest.TestCase):
     def test_installed_implementation_is_compiled(self):
         for module in ('polypaves.api', 'polypaves.reaction.rule', 'polypaves.reaction.local_sage',
@@ -86,6 +140,12 @@ class PublicReactiveWorkflows(unittest.TestCase):
             dry = json.loads(network.read_text())
             metrics = json.loads((network.parent / 'metrics.json').read_text())
             self.assertGreaterEqual(metrics['number_of_reactions'], 1)
+            self.assertEqual(metrics['frames'], 0)
+            self.assertFalse((network.parent / 'cycles').exists())
+            self.assertFalse((network.parent / 'frames').exists())
+            self.assertFalse((network.parent / 'atoms.lammpstrj.gz').exists())
+            self.assertFalse((network.parent / 'bonds.dump.gz').exists())
+            self.assertFalse(json.loads((network.parent / 'settings.json').read_text())['save_trajectory'])
             self.assertIn('USER_CHARGES', (network.parent / 'final.mol2').read_text())
             before = network.read_bytes()
             prepared = project / 'packed'
@@ -113,6 +173,20 @@ class PublicReactiveWorkflows(unittest.TestCase):
             original = (md / 'result.json').read_bytes()
             run(command + ['--resume'], project)
             self.assertEqual((md / 'result.json').read_bytes(), original)
+
+            # Opt-in retains visualization output as well as the final network.
+            run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'with_trajectory',
+                '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
+                '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
+                '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
+                '--minimization-iterations', '100', '--save-trajectory',
+                '--template-cache', network.parent / 'reaction_templates'], project)
+            visual = project / 'results/with_trajectory'
+            self.assertTrue((visual / 'atoms.lammpstrj.gz').is_file())
+            self.assertTrue(list((visual / 'frames').glob('*.data.gz')))
+            self.assertTrue(list((visual / 'cycles').glob('cycle_*.structure.json')))
+            self.assertEqual(json.loads((visual / 'final.structure.json').read_text())['graphs'], dry['graphs'])
+            self.assertEqual(json.loads((visual / 'metrics.json').read_text())['frames'], 3)
 
 
 if __name__ == '__main__':

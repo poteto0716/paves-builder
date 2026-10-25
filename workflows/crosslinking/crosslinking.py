@@ -6,7 +6,7 @@
                     → NPT (300 K, 1 atm, 1 fs, 1000 step)。
 OpenMMはCUDA/mixedが既定。CPUでは --platform CPU を指定する。
 OH*は中性graphにcationic_activityを付けた既存のproxy表現。
-OVITO軌跡と構造ファイルは各cycle終了時に保存する。
+OVITO軌跡とcycle別構造は既定では保存しない。--save-trajectoryで有効にする。
 保存先はカレントのresults/<project>。既存projectの上書きは --force が必要。
 activation.yaml／reactions.yamlはカレントディレクトリから読み込む。
 反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大10 Å。
@@ -14,6 +14,7 @@ activation.yaml／reactions.yamlはカレントディレクトリから読み込
 """
 import argparse
 import copy
+from contextlib import nullcontext
 from dataclasses import asdict, replace
 import json
 import math
@@ -30,13 +31,18 @@ from polypaves.reaction import (
 )
 
 DEFAULT_SMILES = 'CCC(COCC1CO1)(COCC2CO2)COCC3CO3'
-# TMP triglycidyl etherはH込み47原子/分子。100分子+開始点のH 2個。
-DEFAULT_TOTAL_ATOMS = 4702
+# TMP triglycidyl etherはH込み47原子/分子。開始点1個につきHを2個追加する。
+DEFAULT_TOTAL_ATOMS = 20_000
+DEFAULT_ATOM_COUNT_MODE = 'above'
+DEFAULT_CYCLES = 5000
+DEFAULT_TARGET_CONVERSION = .995
 
 
 def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_site,
-              count=None, fraction=None, mode='nearest'):
+              count=None, fraction=None, mode=DEFAULT_ATOM_COUNT_MODE):
     """Resolve whole molecules including activation atoms in the final budget."""
+    if mode not in ('above', 'nearest', 'floor', 'exact'):
+        raise ValueError('atom_count_mode must be above, nearest, floor or exact')
     if (count is None) == (fraction is None):
         raise ValueError('Specify one activation count or fraction')
     if count is not None and (type(count) is not int or count < 1):
@@ -57,7 +63,9 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
         else:
             upper = midpoint
     molecules = lower
-    if mode == 'nearest':
+    if mode == 'above':
+        molecules = upper
+    elif mode == 'nearest':
         molecules = min((lower, upper), key=lambda n: (abs(size(n)[0] - total_atoms), -n))
     actual_atoms, activations = size(molecules)
     if mode == 'exact' and actual_atoms != total_atoms:
@@ -70,29 +78,32 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
 
 
 def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_SMILES, total_atoms=DEFAULT_TOTAL_ATOMS,
-        atom_count_mode='nearest', density=.8, activation_count=None, activation_fraction=None,
-        platform='CUDA', cycles=18, temperature=300.,
+        atom_count_mode=DEFAULT_ATOM_COUNT_MODE, density=.8, activation_count=None, activation_fraction=None,
+        platform='CUDA', cycles=DEFAULT_CYCLES, temperature=300.,
         equilibration_timestep=1.,
         nvt_timestep=.1, nvt_steps=1000, npt_timestep=1., npt_steps=1000,
         pressure_atm=1., minimization_iterations=2000,
-        target_conversion=None, max_reactions_per_cycle=None, seed=31415,
+        target_conversion=DEFAULT_TARGET_CONVERSION, max_reactions_per_cycle=None, seed=31415,
         reaction_cutoff=5., max_reaction_cutoff=10., cutoff_growth_factor=1.2,
         cutoff_zero_cycles=2, fixed_reaction_cutoff=False,
         reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
-        max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False):
-    """packingから反応MD、OVITO軌跡、最終構造の保存まで実行する。
+        max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
+        save_trajectory=False):
+    """packingから反応MD、最終構造の保存まで実行する。
 
     project: 保存先はカレントディレクトリ/results/<project>。
       名前は英数字・Unicode文字・_で始まり、以降はこれらと.-を使用できる。
     force: Trueなら既存projectディレクトリの内容を削除して新規実行する。
     activation.yaml／reactions.yamlはカレントから読み、保存先にもコピーする。
-    total_atoms: 初期化後の目標総原子数（H込み）。nearestは最も近い
-      整数分子数、floorは目標以下、exactは厳密一致（到達不能ならエラー）。
+    total_atoms: 初期化後の目標総原子数（H込み、既定20000）。above（既定）は
+      目標を厳密に超える最小の整数分子数、nearestは最も近い整数分子数、
+      floorは目標以下、exactは厳密一致（到達不能ならエラー）。
     density: packing時のg/cm^3。temperature: K。timestep: fs。
     pressure_atm: atm（ライブラリのbarへ換算して渡す）。
     equilibration_steps: 初期NPTのstep数（既定1,000,000）。既定1 fsで1 ns。
     packing → 開始点作成 → opt → 初期NPT緩和 → 成長cycle。
     各cycleは反応探索／graph更新／Sage再割当／opt → NVT → NPT。
+    cycles: 最大反応サイクル数（既定5000）。target_conversion到達時は早期終了する。
     反応候補がなくても両MDを続け、次cycleで近接を再探索する。
     開始点数／割合は引数を省略するとactivation.yamlを使用する。
     max_reactions_per_cycleを指定するとYAMLのルール上限もその値へ上書きする。
@@ -104,14 +115,17 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
     template_cache: 計算済みフラグメントbank。省略時results/<project>/reaction_templates。
     既知の環境は再計算せず、未知の環境は上限原子数以内で一度計算して保存。
     require_reaction_templates=Trueなら、成長cycle中の未知templateを計算せずエラー。
-    target_conversionは0〜1、Noneならcyclesまで。
-    軌跡と構造ファイルは各cycle終了時に保存。集計JSONもcycleごとに更新する。
+    target_conversionは0〜1（既定0.995）、Noneならcyclesまで。
+    save_trajectory: TrueならOVITO軌跡とcycle別構造も保存する（既定False）。
+    最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
     戻り値はReactiveMDResult。
     """
     if not isinstance(project, str) or not re.fullmatch(r'[\w][\w.-]*', project):
         raise ValueError('project must be a name using letters, digits, underscore, dot or hyphen; no paths')
     if type(force) is not bool:
         raise ValueError('force must be a boolean')
+    if type(save_trajectory) is not bool:
+        raise ValueError('save_trajectory must be a boolean')
     if type(fixed_reaction_cutoff) is not bool:
         raise ValueError('fixed_reaction_cutoff must be a boolean')
     cutoff_policy = AdaptiveReactionCutoff(initial_cutoff=reaction_cutoff,
@@ -142,8 +156,8 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
         raise ValueError('Use activation_count or activation_fraction, not both')
     if max_reactions_per_cycle is not None and (type(max_reactions_per_cycle) is not int or max_reactions_per_cycle < 1):
         raise ValueError('max_reactions_per_cycle must be a positive integer')
-    if atom_count_mode not in ('nearest', 'floor', 'exact'):
-        raise ValueError('atom_count_mode must be nearest, floor or exact')
+    if atom_count_mode not in ('above', 'nearest', 'floor', 'exact'):
+        raise ValueError('atom_count_mode must be above, nearest, floor or exact')
     SimulationConfig(temperature=temperature, timestep=nvt_timestep,
                      nvt_steps=nvt_steps, npt_steps=npt_steps)
     _number(pressure_atm, 'pressure_atm')
@@ -251,7 +265,8 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
                     density_g_cm3=density, temperature_K=temperature, pressure_atm=pressure_atm,
                     equilibration=asdict(equilibration),
                     cycle_md_stages=[asdict(stage) for stage in stages], cycles=cycles,
-                    output_interval_cycles=1,
+                    save_trajectory=save_trajectory,
+                    output_interval_cycles=1 if save_trajectory else None,
                     minimization_iterations=minimization_iterations,
                     target_conversion=target_conversion, max_reactions_per_cycle=max_reactions_per_cycle,
                     adaptive_cutoff=None if fixed_reaction_cutoff else asdict(cutoff_policy),
@@ -261,13 +276,21 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
                     effective_reaction_limits={rule.name: rule.max_reactions_per_cycle for rule in rules}, seed=seed)
     (output / 'settings.json').write_text(json.dumps(settings, indent=2) + '\n')
 
-    with OVITOTrajectoryWriter(output, runner.engine.graph) as trajectory:
+    with (OVITOTrajectoryWriter(output, runner.engine.graph)
+          if save_trajectory else nullcontext()) as trajectory:
         def reactive_atom_ids():
             return {sid for roles in runner.engine.tracker.current.values()
                     for sites in roles for site in sites for sid in site}
 
+        def write_frame(active, **metadata):
+            if trajectory is not None:
+                trajectory.write(active.engine.graph,
+                    OpenMMStateSnapshot.from_simulation(active.simulation),
+                    reactive_atom_ids=reactive_atom_ids(), **metadata)
+                trajectory.flush()
+
         def save_summary(active):
-            metrics = {**active.metrics, 'frames': trajectory.num_frames,
+            metrics = {**active.metrics, 'frames': trajectory.num_frames if trajectory is not None else 0,
                        'initiated_sites': plan['activation_count'],
                        'initial_epoxide_sites': plan['initial_epoxide_sites'],
                        'epoxide_consumption_including_activation':
@@ -286,29 +309,22 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
             write_structure_files(active.structure, prefix, charges=[
                 atom['partial_charge'] for graph in active.structure.graphs for atom in graph['atoms']])
 
-        trajectory.write(runner.engine.graph,
-            OpenMMStateSnapshot.from_simulation(runner.simulation), phase='initial',
-            reactive_atom_ids=reactive_atom_ids())
-        trajectory.flush()
+        write_frame(runner, phase='initial')
         # 初期緩和中は成長反応を実行しない。座標・速度・boxを成長へ引き継ぐ。
         runner.equilibrate([equilibration])
         runner.structure.write_json(output / 'before_reaction.structure.json')
-        trajectory.write(runner.engine.graph,
-            OpenMMStateSnapshot.from_simulation(runner.simulation), phase='equilibrated',
-            reactive_atom_ids=reactive_atom_ids())
-        trajectory.flush()
+        write_frame(runner, phase='equilibrated')
         save_summary(runner)
 
         def save_cycle(active, cycle):
-            trajectory.write(active.engine.graph,
-                OpenMMStateSnapshot.from_simulation(active.simulation),
+            write_frame(active,
                 cycle=cycle['cycle'], phase='cycle end', reactions=len(active.history),
-                conversion=cycle['conversion'], reactive_atom_ids=reactive_atom_ids())
-            trajectory.flush()
-            # 反応／opt／NVT／NPTをすべて終えた状態をcycle番号別に保存する。
-            directory = output / 'cycles'
-            directory.mkdir(exist_ok=True)
-            save_structure(active, directory / f"cycle_{cycle['cycle'] + 1:05d}")
+                conversion=cycle['conversion'])
+            if save_trajectory:
+                # 有効時のみ、cycleごとの構造も可視化用の履歴として保存する。
+                directory = output / 'cycles'
+                directory.mkdir(exist_ok=True)
+                save_structure(active, directory / f"cycle_{cycle['cycle'] + 1:05d}")
             save_summary(active)
 
         # md_steps_per_cycle=0で各cycleを反応探索から始める。
@@ -328,16 +344,22 @@ def main():
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument('--smiles', help='エポキシ1分子のSMILES')
     inputs.add_argument('--smiles-file', type=Path, help='SMILESを1つだけ書いたテキストファイル')
-    parser.add_argument('--total-atoms', type=int, default=DEFAULT_TOTAL_ATOMS)
-    parser.add_argument('--atom-count-mode', choices=('nearest', 'floor', 'exact'), default='nearest')
+    parser.add_argument('--total-atoms', type=int, default=DEFAULT_TOTAL_ATOMS,
+                        help='開始点の追加Hを含む目標総原子数（既定20000）')
+    parser.add_argument('--atom-count-mode', choices=('above', 'nearest', 'floor', 'exact'),
+                        default=DEFAULT_ATOM_COUNT_MODE,
+                        help='原子数の丸め方。aboveは目標を超える最小分子数（既定above）')
     parser.add_argument('--density', type=float, default=.8)
     starts = parser.add_mutually_exclusive_group()
     starts.add_argument('--activation-count', type=int)
     starts.add_argument('--activation-fraction', type=float, help='開始点の割合。省略時はactivation.yamlを使用')
     parser.add_argument('--project', required=True, help='保存先: カレントのresults/<project>')
     parser.add_argument('--force', action='store_true', help='既存projectの内容を削除して再実行する')
+    parser.add_argument('--save-trajectory', action='store_true',
+                        help='OVITO軌跡とcycle別構造を保存する（既定OFF）')
     parser.add_argument('--platform', choices=('CUDA', 'CPU'), default='CUDA')
-    parser.add_argument('--cycles', type=int, default=18)
+    parser.add_argument('--cycles', type=int, default=DEFAULT_CYCLES,
+                        help='最大反応サイクル数（既定5000）')
     parser.add_argument('--temperature', type=float, default=300.)
     parser.add_argument('--equilibration-steps', type=int, default=1_000_000,
                         help='初期NPTのstep数（既定1000000）。既定1 fs刻みで1 ns')
@@ -348,7 +370,8 @@ def main():
     parser.add_argument('--npt-steps', type=int, default=1000)
     parser.add_argument('--pressure-atm', type=float, default=1.)
     parser.add_argument('--minimization-iterations', type=int, default=2000)
-    parser.add_argument('--target-conversion', type=float)
+    parser.add_argument('--target-conversion', type=float, default=DEFAULT_TARGET_CONVERSION,
+                        help='目標反応率0〜1（既定0.995 = 99.5%%）')
     parser.add_argument('--max-reactions-per-cycle', type=int, help='1 cycleの最大反応数。指定時はYAMLのルール上限も上書き')
     parser.add_argument('--reaction-cutoff', type=float, default=5., help='開始時の反応探索距離 Å（YAMLを上書き、既定5）')
     parser.add_argument('--max-reaction-cutoff', type=float, default=10., help='探索距離の上限 Å（既定10）')
