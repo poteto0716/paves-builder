@@ -524,12 +524,12 @@ def run(args):
     replicas = [selected] if selected is not None else range(1, cfg['replicates'] + 1)
     for replica in replicas:
         base = project / f'replica_{replica:02d}'
-        with file_lock(base / '.run.lock', blocking=False):
+        with file_lock(base / '.run.lock', blocking=False) as lock:
             write_json(base / 'execution.json', dict(replica=replica, seed=cfg['seed'] + replica,
                 platform=cfg['platform'], cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES')))
             if cfg.get('input_mode') == 'epoxy':
                 from workflows.network_properties.epoxy_pipeline import ensure_network
-                ensure_network(project, cfg, replica)
+                ensure_network(project, cfg, replica, lock)
             dry_properties(project, cfg, replica)
             if cfg['mechanical']:
                 from workflows.network_properties.mechanical import run_mechanical

@@ -1,7 +1,12 @@
 """Process locks shared by sequential runs, GPU workers and report generation."""
 from contextlib import contextmanager
+import ctypes
 import fcntl
+import os
 from pathlib import Path
+import signal
+
+PR_SET_PDEATHSIG = 1
 
 
 @contextmanager
@@ -14,6 +19,18 @@ def file_lock(path, *, blocking=True):
         except BlockingIOError as exc:
             raise RuntimeError(f'Already running: {path.parent}') from exc
         try:
-            yield
+            yield handle
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def die_with_parent():
+    """preexec_fn: SIGTERM this child when the starting process dies.
+
+    Without it a killed worker leaves its crosslinking child running, and a
+    later run would start a second build in the same directory.
+    """
+    parent = os.getppid()
+    ctypes.CDLL(None, use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    if os.getppid() != parent:
+        os._exit(1)

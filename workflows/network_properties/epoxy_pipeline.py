@@ -103,8 +103,9 @@ def build_command(project, cfg, replica):
     return command
 
 
-def ensure_network(project, cfg, replica):
+def ensure_network(project, cfg, replica, lock=None):
     from workflows.network_properties.network_properties import digest, write_json
+    from workflows.network_properties.execution import die_with_parent
     source = network_path(project, cfg, replica)
     if cfg.get('input_mode') != 'epoxy':
         return source
@@ -123,8 +124,11 @@ def ensure_network(project, cfg, replica):
     write_json(work / 'invocation.json', dict(command=command, cwd=str(work), seed=cfg['seed'] + replica))
     print(f'Replica {replica}: build and crosslink epoxy, seed={cfg["seed"] + replica}', flush=True)
     # Inherit the worker's single selected GPU; never share a working directory.
+    # The child also holds the replica lock, so an orphaned build still blocks
+    # a restart from deleting its output with --force.
     try:
-        subprocess.run(command, cwd=work, check=True)
+        subprocess.run(command, cwd=work, check=True, preexec_fn=die_with_parent,
+                       pass_fds=() if lock is None else (lock.fileno(),))
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f'Epoxy construction failed for replica {replica}; see its job log') from exc
     settings = json.loads((source.parent / 'settings.json').read_text())
