@@ -559,6 +559,10 @@ def main(argv=None):
     starts.add_argument('--activation-count', type=int)
     starts.add_argument('--activation-fraction', type=float)
     create.add_argument('--max-reactions-per-cycle', type=int)
+    create.add_argument('--compression-pressure-mpa', type=float,
+                        help='pre-crosslinking compression NPT pressure in MPa (default 200)')
+    create.add_argument('--compression-steps', type=int,
+                        help='compression NPT steps at 1 fs (default 50000 = 50 ps; 0 disables)')
     create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
     create.add_argument('--activation-yaml', type=Path)
     create.add_argument('--reactions-yaml', type=Path)

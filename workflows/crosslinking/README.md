@@ -1,7 +1,7 @@
 # 架橋エポキシネットワークの構築
 
 溶媒を加える前の架橋モデルを、公開wheelのPAVES APIで生成します。
-モノマーのSMILESからpackし、開始点を作成、初期NPT緩和後に
+モノマーのSMILESからpackし、開始点を作成、加圧NPTと初期NPT緩和の後に
 反応→最小化→NVT→NPTを繰り返します。反応後は局所Sageテンプレートで割り当てを更新します。
 本体の実装はwheel内のコンパイル済みモジュールにあり、このスクリプトはAPIの実行例です。
 
@@ -23,6 +23,9 @@ python crosslinking.py --project epoxy \
 切り上げます。既定モノマー・開始点割合10%では421分子、初期化後20039原子です。
 `nearest`（最も近い原子数）、`floor`（目標以下）、`exact`（厳密一致）も明示指定できます。
 要求値と実現した原子数は`settings.json`と`metrics.json`に記録します。
+packing直後のvoidを潰すため、初期NPTの前に300 K・200 MPa・50 ps（1 fs×50000 step）の
+加圧NPTを行います。`--compression-pressure-mpa`と`--compression-steps`で変更でき、
+`--compression-steps 0`で無効です。加圧後は座標・速度・boxをそのまま1 atmの初期NPTへ渡します。
 初期NPTは300 K・1 atm・1 ns、各cycleは最小化、0.1 fs×1000 stepのNVT、
 1 fs×1000 stepのNPTです。時間・温度・圧力・反応上限・距離はCLIで変更できます。
 目標反応率は既定で99.5%（`--target-conversion 0.995`）、最大サイクル数は5000です。
@@ -30,6 +33,8 @@ python crosslinking.py --project epoxy \
 変更する場合は`--target-conversion`と`--cycles`を明示してください。
 
 反応規則は同じディレクトリの`activation.yaml`と`reactions.yaml`です。
+`--activation-fraction`／`--activation-count`を指定すると、`results/<project>/activation.yaml`の
+`selection`と`fraction`／`count`の行もその値に書き換えて保存します（元のファイルは変更しません）。
 これは中性OHへ活動状態を付けて伝播させる有効モデルで、帯電したカチオン機構そのものを
 再現するモデルではありません。反応探索距離から実際の反応速度や障壁は求まりません。
 ルールの定義は[YAML_GUIDE.md](YAML_GUIDE.md)を参照してください。
@@ -39,7 +44,7 @@ python crosslinking.py --project epoxy \
 ```bash
 OPENMM_CPU_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   python crosslinking.py --project smoke --total-atoms 500 --activation-count 1 \
-  --platform CPU --equilibration-steps 2 --cycles 1 \
+  --platform CPU --compression-steps 2 --equilibration-steps 2 --cycles 1 \
   --nvt-steps 2 --npt-steps 2 --max-reactions-per-cycle 1 \
   --reaction-cutoff 10 --max-reaction-cutoff 10 --minimization-iterations 100
 ```

@@ -38,7 +38,7 @@ class EpoxyPipelineTests(unittest.TestCase):
         self.assertEqual(options['atom_count_mode'],'above')
         self.assertEqual(options['cycles'],5000)
 
-    def write_build(self, command, cwd, check):
+    def write_build(self, command, cwd, check, **options):
         seed=int(command[command.index('--seed')+1])
         output=Path(cwd)/'results/epoxy'
         output.mkdir(parents=True,exist_ok=True)
@@ -82,7 +82,7 @@ class EpoxyPipelineTests(unittest.TestCase):
     def test_worker_constructs_before_its_own_physical_properties(self):
         events=[]
         with patch('workflows.network_properties.network_properties.initialize_project',return_value=self.cfg), \
-             patch('workflows.network_properties.epoxy_pipeline.ensure_network',side_effect=lambda p,c,r:events.append(('build',r))), \
+             patch('workflows.network_properties.epoxy_pipeline.ensure_network',side_effect=lambda p,c,r,lock=None:events.append(("build",r))), \
              patch('workflows.network_properties.network_properties.dry_properties',side_effect=lambda p,c,r:events.append(('properties',r))):
             run(Namespace(project=self.project,replica=None,defer_report=True))
         self.assertEqual(events,[('build',1),('properties',1),('build',2),('properties',2)])

@@ -30,10 +30,12 @@ def configure(args):
         activation_fraction=getattr(args, 'activation_fraction', None),
         activation_count=getattr(args, 'activation_count', None),
         max_reactions_per_cycle=getattr(args, 'max_reactions_per_cycle', None),
-        save_trajectory=getattr(args, 'save_trajectory', False))
+        save_trajectory=getattr(args, 'save_trajectory', False),
+        compression_pressure_mpa=getattr(args, 'compression_pressure_mpa', None),
+        compression_steps=getattr(args, 'compression_steps', None))
     options.update({k:v for k,v in overrides.items() if v is not None})
     if args.smoke:
-        options.update(equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2,
+        options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2,
             max_reactions_per_cycle=1, reaction_cutoff=10., max_reaction_cutoff=10.,
             minimization_iterations=100)
         if overrides['total_atoms'] is None:
@@ -44,6 +46,10 @@ def configure(args):
                                   getattr(args, 'reactions_yaml', None))))
     definitions = {name: (Path(path) if path else CROSSLINKING / name).read_bytes()
                    for name, path in paths.items()}
+    from workflows.crosslinking.crosslinking import activation_yaml_with_selection
+    # The project's copied activation.yaml states the start count/fraction actually used.
+    definitions['activation.yaml'] = activation_yaml_with_selection(definitions['activation.yaml'].decode(),
+        count=options['activation_count'], fraction=options['activation_fraction']).encode()
     hashes = {name: hashlib.sha256(content).hexdigest() for name,content in definitions.items()}
     fingerprint = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
     return dict(input_mode='epoxy', crosslinking=options, definition_sha256=hashes,

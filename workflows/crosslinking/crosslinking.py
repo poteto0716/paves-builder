@@ -1,5 +1,6 @@
 """SMILES／総原子数からpure epoxyをpackし、初期NPT緩和後に反応MDを行う。
 
+packing後の加圧NPT: 300 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
 初期NPT: 300 K、1 atm、1 fs × 1,000,000 step = 1 ns。
 
 各cycle: 反応 → opt → NVT (300 K, 0.1 fs, 1000 step)
@@ -36,6 +37,37 @@ DEFAULT_TOTAL_ATOMS = 20_000
 DEFAULT_ATOM_COUNT_MODE = 'above'
 DEFAULT_CYCLES = 5000
 DEFAULT_TARGET_CONVERSION = .995
+
+
+def activation_yaml_with_selection(text, *, count=None, fraction=None):
+    """Return activation.yaml text whose first rule uses the CLI count/fraction.
+
+    Only the selection/count/fraction lines of the first rule (the one this
+    script reads) are rewritten, so comments and other keys stay as written.
+    With neither override the text is returned unchanged.
+    """
+    if count is None and fraction is None:
+        return text
+    lines = text.splitlines(keepends=True)
+    starts = [i for i, line in enumerate(lines) if re.match(r'\s*- ', line)]
+    if not starts:
+        raise ValueError('activation.yaml has no activation rule')
+    first = starts[0]
+    item = len(lines[first]) - len(lines[first].lstrip())
+    end = next((i for i in starts[1:] if len(lines[i]) - len(lines[i].lstrip()) <= item), len(lines))
+    key = re.compile(r'(\s*)(selection|count|fraction):')
+    found = [(i, key.match(lines[i])) for i in range(first, end) if key.match(lines[i])]
+    selections = [(i, m) for i, m in found if m.group(2) == 'selection']
+    if len(selections) != 1:
+        raise ValueError('the first activation rule must have exactly one selection line')
+    index, match = selections[0]
+    indent, newline = match.group(1), '\n'
+    mode, value = ('count', count) if count is not None else ('fraction', fraction)
+    replacement = [f'{indent}selection: {mode}{newline}', f'{indent}{mode}: {value!r}{newline}']
+    drop = {i for i, m in found if m.group(2) in ('count', 'fraction') and m.group(1) == indent}
+    body = [line for i, line in enumerate(lines[first:end], first) if i not in drop and i != index]
+    body.insert(index - first - sum(i < index for i in drop), ''.join(replacement))
+    return ''.join(lines[:first] + body + lines[end:])
 
 
 def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_site,
@@ -77,7 +109,8 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
                 initial_epoxide_sites=molecules * sites_per_molecule)
 
 
-def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_SMILES, total_atoms=DEFAULT_TOTAL_ATOMS,
+def run(project, *, force=False, compression_steps=50_000, compression_pressure_mpa=200.,
+        equilibration_steps=1_000_000, smiles=DEFAULT_SMILES, total_atoms=DEFAULT_TOTAL_ATOMS,
         atom_count_mode=DEFAULT_ATOM_COUNT_MODE, density=.8, activation_count=None, activation_fraction=None,
         platform='CUDA', cycles=DEFAULT_CYCLES, temperature=300.,
         equilibration_timestep=1.,
@@ -100,8 +133,11 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
       floorは目標以下、exactは厳密一致（到達不能ならエラー）。
     density: packing時のg/cm^3。temperature: K。timestep: fs。
     pressure_atm: atm（ライブラリのbarへ換算して渡す）。
+    compression_steps: 加圧NPTのstep数（既定50,000）。equilibration_timestep刻みで既定50 ps。
+      0なら加圧しない。compression_pressure_mpa: 加圧NPTの圧力 MPa（既定200）。
+      packing直後のvoidを潰すため、初期NPTより前に実行する。
     equilibration_steps: 初期NPTのstep数（既定1,000,000）。既定1 fsで1 ns。
-    packing → 開始点作成 → opt → 初期NPT緩和 → 成長cycle。
+    packing → 開始点作成 → opt → 加圧NPT → 初期NPT緩和 → 成長cycle。
     各cycleは反応探索／graph更新／Sage再割当／opt → NVT → NPT。
     cycles: 最大反応サイクル数（既定5000）。target_conversion到達時は早期終了する。
     反応候補がなくても両MDを続け、次cycleで近接を再探索する。
@@ -163,7 +199,8 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
     _number(pressure_atm, 'pressure_atm')
     _number(density, 'density')
     for name, value, minimum in (('cycles', cycles, 0),
-                                 ('minimization_iterations', minimization_iterations, 0)):
+                                 ('minimization_iterations', minimization_iterations, 0),
+                                 ('compression_steps', compression_steps, 0)):
         if type(value) is not int or value < minimum:
             raise ValueError(f'{name} must be an integer >= {minimum}')
     if target_conversion is not None and not 0 <= target_conversion <= 1:
@@ -178,6 +215,7 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
     activation_rule = load_activation_definitions(definitions / 'activation.yaml')[0]
     rules = load_reaction_definitions(definitions / 'reactions.yaml')
     selector = rules.selection
+    cli_selection = dict(count=activation_count, fraction=activation_fraction)
     if activation_count is None and activation_fraction is None:
         if activation_rule.selection in ('fraction', 'random') and activation_rule.fraction is not None:
             activation_fraction = activation_rule.fraction
@@ -196,6 +234,14 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
     stages = (MDStage('NVT', steps=nvt_steps, timestep=nvt_timestep, temperature=temperature),
               MDStage('NPT', steps=npt_steps, timestep=npt_timestep, temperature=temperature,
                       pressure=pressure_bar))
+    if compression_steps:
+        _number(compression_pressure_mpa, 'compression_pressure_mpa')
+        if compression_pressure_mpa <= 0:
+            raise ValueError('compression_pressure_mpa must be positive')
+    # 1 MPa = 10 bar。加圧後は同じ座標・速度・boxのまま1 atmへ戻す。
+    compression = (MDStage('NPT', steps=compression_steps, timestep=equilibration_timestep,
+                           temperature=temperature, pressure=compression_pressure_mpa * 10.)
+                   if compression_steps else None)
     equilibration = MDStage('NPT', steps=equilibration_steps, timestep=equilibration_timestep,
                             temperature=temperature, pressure=pressure_bar)
 
@@ -209,8 +255,10 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
             raise NotADirectoryError(f'Project path is not a directory: {output}')
         shutil.rmtree(output)
     output.mkdir(parents=True)
-    for name in ('activation.yaml', 'reactions.yaml'):
-        shutil.copy2(definitions / name, output / name)
+    shutil.copy2(definitions / 'reactions.yaml', output / 'reactions.yaml')
+    # CLIの開始点数／割合を保存先のactivation.yamlにも反映し、実際の設定と一致させる。
+    (output / 'activation.yaml').write_text(activation_yaml_with_selection(
+        (definitions / 'activation.yaml').read_text(), **cli_selection))
     precision = 'mixed' if platform == 'CUDA' else None
 
     # p.Solventはpackへの分子指定。開始点で追加するHを原子予算から引く。
@@ -263,6 +311,8 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
                     activation_fraction=activation_fraction, initial_epoxide_sites=plan['initial_epoxide_sites'],
                     actual_activation_fraction=plan['activation_count'] / plan['initial_epoxide_sites'],
                     density_g_cm3=density, temperature_K=temperature, pressure_atm=pressure_atm,
+                    compression=asdict(compression) if compression else None,
+                    compression_pressure_MPa=compression_pressure_mpa if compression else None,
                     equilibration=asdict(equilibration),
                     cycle_md_stages=[asdict(stage) for stage in stages], cycles=cycles,
                     save_trajectory=save_trajectory,
@@ -311,7 +361,7 @@ def run(project, *, force=False, equilibration_steps=1_000_000, smiles=DEFAULT_S
 
         write_frame(runner, phase='initial')
         # 初期緩和中は成長反応を実行しない。座標・速度・boxを成長へ引き継ぐ。
-        runner.equilibrate([equilibration])
+        runner.equilibrate([compression, equilibration] if compression else [equilibration])
         runner.structure.write_json(output / 'before_reaction.structure.json')
         write_frame(runner, phase='equilibrated')
         save_summary(runner)
@@ -361,6 +411,10 @@ def main():
     parser.add_argument('--cycles', type=int, default=DEFAULT_CYCLES,
                         help='最大反応サイクル数（既定5000）')
     parser.add_argument('--temperature', type=float, default=300.)
+    parser.add_argument('--compression-steps', type=int, default=50_000,
+                        help='packing後の加圧NPTのstep数（既定50000）。既定1 fs刻みで50 ps、0で無効')
+    parser.add_argument('--compression-pressure-mpa', type=float, default=200.,
+                        help='加圧NPTの圧力 MPa（既定200）')
     parser.add_argument('--equilibration-steps', type=int, default=1_000_000,
                         help='初期NPTのstep数（既定1000000）。既定1 fs刻みで1 ns')
     parser.add_argument('--equilibration-timestep', type=float, default=1.)

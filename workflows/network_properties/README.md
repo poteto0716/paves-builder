@@ -38,6 +38,8 @@ SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別�
 作成済みのproject.jsonにもすべての設定を記録します。
 架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
 トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
+packing後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
+`--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
 `--epoxy-smiles`、`--total-atoms`、`--target-conversion`、`--cycles`、
 `--activation-fraction`または`--activation-count`で変更できます。
 独自の反応ルールは`--activation-yaml`、`--reactions-yaml`で渡します。

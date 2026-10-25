@@ -133,7 +133,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'epoxy',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100'], project)
             network = project / 'results/epoxy/final.structure.json'
@@ -177,7 +177,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             # Opt-in retains visualization output as well as the final network.
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'with_trajectory',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--save-trajectory',
                 '--template-cache', network.parent / 'reaction_templates'], project)
