@@ -211,6 +211,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     epoxides = molecule.GetSubstructMatches(Chem.MolFromSmarts('[C]1[O;+0;X2][C]1'))
     if not epoxides:
         raise ValueError('smiles must contain a neutral C-O-C epoxide ring')
+    # Kekulé入力（C1=CC=CC=C1など）はそのまま単結合/二重結合のgraphになる。反応後の
+    # 再検証で原子だけが芳香族になり、局所フラグメントが環の単結合で切れて
+    # "non-ring atom N marked aromatic"で停止するため、芳香族表記の正規SMILESでpackする。
+    input_smiles, smiles = smiles, Chem.MolToSmiles(molecule)
     atoms_per_molecule = Chem.AddHs(molecule).GetNumAtoms()
     activation_rule = load_activation_definitions(definitions / 'activation.yaml')[0]
     rules = load_reaction_definitions(definitions / 'reactions.yaml')
@@ -304,7 +308,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         field.precompute(runner.engine.graph, selected)
     runner.structure.write_json(output / 'initial.structure.json')
     settings = dict(project=project, working_directory=str(definitions), output_directory=str(output),
-                    smiles=smiles, target_total_atoms=total_atoms,
+                    smiles=smiles, input_smiles=input_smiles, target_total_atoms=total_atoms,
                     atom_count_mode=atom_count_mode, atoms_per_molecule=atoms_per_molecule,
                     packed_atoms=packed_atoms, actual_total_atoms=structure.n_atoms,
                     monomers=plan['monomers'], activation_count=plan['activation_count'],

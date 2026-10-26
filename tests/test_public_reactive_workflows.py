@@ -116,6 +116,32 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 [nb.getParticleParameters(i)[0].value_in_unit(unit.elementary_charge)
                  for i in range(host.atom_count)])
 
+    def test_kekule_aromatic_epoxy_is_packed_as_aromatic(self):
+        # A Kekulé SMILES used to stop in reaction-template precompute with
+        # "non-ring atom N marked aromatic": rings stored as 1/2 bonds were cut.
+        kekule = ('C12C=CC=CC=1C1C=CC=CC=1C2(C1C=CC2C=C(OCC3OC3)C=CC=2C=1)'
+                  'C1C=C2C=CC(OCC3CO3)=CC2=CC=1')
+        env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
+        env.pop('PYTHONPATH', None)
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for name in ('activation.yaml', 'reactions.yaml'):
+                shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
+            completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
+                '--project', 'kekule', '--smiles', kekule, '--total-atoms', '400', '--activation-count', '1',
+                '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
+                '--nvt-steps', '2', '--npt-steps', '2', '--max-reactions-per-cycle', '1',
+                '--reaction-cutoff', '10', '--max-reaction-cutoff', '10', '--minimization-iterations', '100'],
+                cwd=project, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+            output = project / 'results/kekule'
+            settings = json.loads((output / 'settings.json').read_text())
+            self.assertEqual(settings['input_smiles'], kekule)
+            self.assertNotIn('=', settings['smiles'])
+            graph = json.loads((output / 'initial.structure.json').read_text())['graphs'][0]
+            self.assertEqual(sum(a['aromatic'] for a in graph['atoms']), 32)
+            self.assertGreaterEqual(json.loads((output / 'metrics.json').read_text())['number_of_reactions'], 1)
+
     def test_crosslink_water_pack_and_md_resume(self):
         import numpy as np
         env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
