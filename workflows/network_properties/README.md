@@ -93,6 +93,18 @@ GPUが1台なら`--gpus 0`で全レプリカを順番に実行します。
 管理プロセスのログは`jobs/launcher.log`、PIDは`jobs/launcher.json`、
 GPU・seed・ジョブ状態は`jobs/plan.json`と`jobs/status.json`に記録します。
 各レプリカにも`execution.json`を保存します。
+
+`status`は各レプリカの現在の計算段階（架橋構築、熱履歴の各温度、NVT、弾性、熱輸送、
+溶媒ごとのpack・挿入自由エネルギー・拡散MD）と経過時間、架橋中なら最新のcycleと反応率、
+ジョブログの最終行を表示します。段階は`replica_XX/progress.json`に記録し、直近の履歴も残します。
+ランチャーやワーカーのPIDが存在しない、または終了済みで回収されていない（zombie）場合は
+`status`が警告します。その場合は各レプリカの状態を確認し、再度`submit`すると未完了分を再開します。
+
+計算がエラーで終了すると、失敗した段階とPythonのtracebackを`replica_XX/error.log`へ書き出します。
+架橋構築で失敗した場合は、`crosslinking.py`のエラー行と標準エラー出力の末尾も含めます。
+ランチャーは原因の1行を`jobs/status.json`の`error`へ記録し、今回の試行分のログ末尾300行を
+`jobs/replica_XX.error.log`へ保存します。SIGKILLなどのシグナルで強制終了された場合は
+シグナル名を記録します（SIGKILLはメモリ不足時のOOM killerでも発生します）。
 構築結果は`replica_XX/crosslinking/results/epoxy/`、
 その入力・到達反応率・構造ハッシュは`replica_XX/network_origin.json`に記録します。
 

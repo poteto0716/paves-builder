@@ -7,7 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
@@ -38,7 +38,16 @@ class EpoxyPipelineTests(unittest.TestCase):
         self.assertEqual(options['atom_count_mode'],'above')
         self.assertEqual(options['cycles'],5000)
 
-    def write_build(self, command, cwd, check, **options):
+    def fake_popen(self, command, cwd, *, stderr_lines=(), returncode=0, **options):
+        if not returncode:
+            self.write_build(command, cwd)
+        child=MagicMock()
+        child.__enter__.return_value=child
+        child.stderr=iter(stderr_lines)
+        child.returncode=returncode
+        return child
+
+    def write_build(self, command, cwd):
         seed=int(command[command.index('--seed')+1])
         output=Path(cwd)/'results/epoxy'
         output.mkdir(parents=True,exist_ok=True)
@@ -50,7 +59,7 @@ class EpoxyPipelineTests(unittest.TestCase):
             epoxide_consumption_including_activation=.8)))
 
     def test_each_replica_gets_its_own_build_and_completed_build_is_reused(self):
-        with patch('workflows.network_properties.epoxy_pipeline.subprocess.run',side_effect=self.write_build) as build:
+        with patch('workflows.network_properties.epoxy_pipeline.subprocess.Popen',side_effect=self.fake_popen) as build:
             first=ensure_network(self.project,self.cfg,1)
             second=ensure_network(self.project,self.cfg,2)
             self.assertNotEqual(first,second)
@@ -67,11 +76,20 @@ class EpoxyPipelineTests(unittest.TestCase):
         source=network_path(self.project,self.cfg,1)
         source.parent.mkdir(parents=True)
         self.assertIn('--force',build_command(self.project,self.cfg,1))
-        with patch('workflows.network_properties.epoxy_pipeline.subprocess.run',side_effect=self.write_build):
+        with patch('workflows.network_properties.epoxy_pipeline.subprocess.Popen',side_effect=self.fake_popen):
             ensure_network(self.project,self.cfg,1)
         source.write_text('{}')
         with self.assertRaisesRegex(ValueError,'changed'):
             ensure_network(self.project,self.cfg,1)
+
+    def test_failed_build_reports_the_crosslinking_error(self):
+        lines=['Traceback (most recent call last):\n','ValueError: compression_pressure_mpa must be positive\n']
+        failing=lambda command,cwd,**o:self.fake_popen(command,cwd,stderr_lines=lines,returncode=1,**o)
+        with patch('workflows.network_properties.epoxy_pipeline.subprocess.Popen',side_effect=failing), \
+             redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'replica 1: ValueError: compression_pressure_mpa'):
+                ensure_network(self.project,self.cfg,1)
+        self.assertFalse((self.project/'replica_01/crosslinking/done.json').exists())
 
     def test_rule_files_are_copied_and_input_changes_are_detectable(self):
         original=self.cfg['input_sha256']

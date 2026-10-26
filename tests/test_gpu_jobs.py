@@ -83,6 +83,8 @@ with marker.open('x'):
         time.sleep(.05)
     finally:
         marker.unlink()
+if replica==fail:
+    print('ValueError: injected failure', file=__import__('sys').stderr)
 raise SystemExit(7 if replica==fail else 0)
 '''
         return lambda project,replica:[sys.executable,'-c',script,str(project),str(replica),str(fail_replica or 0)]
@@ -110,6 +112,43 @@ raise SystemExit(7 if replica==fail else 0)
         self.assertEqual(result['state'],'failed')
         self.assertEqual(result['jobs'][1]['returncode'],7)
         self.assertEqual(result['jobs'][2]['state'],'completed')
+        failed=result['jobs'][1]
+        self.assertEqual(failed['error'],'ValueError: injected failure')
+        self.assertIn('ValueError: injected failure',Path(failed['error_log']).read_text())
+        self.assertNotIn('error',result['jobs'][2])
+        with redirect_stdout(io.StringIO()) as output:
+            jobs.status(Namespace(project=self.project))
+        self.assertIn('cause: ValueError: injected failure',output.getvalue())
+
+    def test_signal_exit_and_progress_records(self):
+        from workflows.network_properties.execution import replica_progress, set_stage, read_progress
+        self.assertIn('SIGKILL',jobs.failure_summary('',-9))
+        self.assertEqual(jobs.failure_summary('x\nRuntimeError: late\n',1),'RuntimeError: late')
+        base=self.project/'replica_01'
+        with redirect_stdout(io.StringIO()), self.assertRaises(ZeroDivisionError):
+            with replica_progress(base):
+                set_stage(base,'thermal history: 03_cool_000_sample',temperature_K=800.)
+                1/0
+        progress=read_progress(base)
+        self.assertEqual(progress['state'],'failed')
+        self.assertEqual(progress['stage'],'thermal history: 03_cool_000_sample')
+        text=(base/'error.log').read_text()
+        self.assertIn('during stage: thermal history: 03_cool_000_sample',text)
+        self.assertIn('ZeroDivisionError',text)
+        with redirect_stdout(io.StringIO()):
+            with replica_progress(base):
+                set_stage(base,'mechanical: elastic constants')
+        progress=read_progress(base)
+        self.assertEqual((progress['state'],progress['history'][-1]['stage']),
+                         ('completed','mechanical: elastic constants'))
+
+    def test_status_flags_lost_and_zombie_workers(self):
+        child=subprocess.Popen([sys.executable,'-c','pass'])
+        while jobs.process_state(child.pid)!='Z':
+            pass
+        self.assertEqual(jobs.process_state(child.pid),'Z')
+        child.wait()
+        self.assertIsNone(jobs.process_state(child.pid))
 
     def test_single_replica_run_uses_correct_seed_and_defers_shared_report(self):
         args = Namespace(project=self.project,replica=2,defer_report=True)

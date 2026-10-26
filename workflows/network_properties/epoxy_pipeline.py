@@ -5,13 +5,16 @@ import hashlib
 import inspect
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
+from collections import deque
 
 ROOT = Path(__file__).resolve().parents[2]
 CROSSLINKING = ROOT / 'workflows/crosslinking'
 DEFINITIONS = ('activation.yaml', 'reactions.yaml')
+CHILD_ERROR = re.compile(r'^[\w.]+(?:Error|Exception|Interrupt)\b')
 
 
 def defaults():
@@ -132,11 +135,22 @@ def ensure_network(project, cfg, replica, lock=None):
     # Inherit the worker's single selected GPU; never share a working directory.
     # The child also holds the replica lock, so an orphaned build still blocks
     # a restart from deleting its output with --force.
-    try:
-        subprocess.run(command, cwd=work, check=True, preexec_fn=die_with_parent,
-                       pass_fds=() if lock is None else (lock.fileno(),))
-    except subprocess.CalledProcessError as exc:
-        raise RuntimeError(f'Epoxy construction failed for replica {replica}; see its job log') from exc
+    # stderr is relayed line by line to the job log and its tail kept, so a failure
+    # names the crosslinking error itself rather than only the exit status.
+    tail = deque(maxlen=200)
+    with subprocess.Popen(command, cwd=work, stderr=subprocess.PIPE, text=True, errors='replace',
+                          preexec_fn=die_with_parent,
+                          pass_fds=() if lock is None else (lock.fileno(),)) as child:
+        for line in child.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
+            tail.append(line)
+    if child.returncode:
+        errors = [line.strip() for line in tail if CHILD_ERROR.match(line.strip())]
+        cause = errors[-1] if errors else f'exit status {child.returncode}'
+        failure = RuntimeError(f'Epoxy construction failed for replica {replica}: {cause}')
+        failure.add_note('--- crosslinking.py stderr (last lines) ---\n' + ''.join(tail).rstrip())
+        raise failure
     settings = json.loads((source.parent / 'settings.json').read_text())
     metrics = json.loads((source.parent / 'metrics.json').read_text())
     if settings['seed'] != cfg['seed'] + replica:

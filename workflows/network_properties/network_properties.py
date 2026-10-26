@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.analysis import analyze_npt, analyze_nvt, aggregate, topology, DA
 from workflows.thermomechanical.analysis import fit_tg
-from workflows.network_properties.execution import file_lock
+from workflows.network_properties.execution import file_lock, replica_progress, set_stage
 
 
 DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=.5,
@@ -196,6 +196,8 @@ def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, min
         runner.context.setState(mm.XmlSerializer.deserialize((directory / 'state.xml').read_text()))
         return json.loads((directory / 'samples.json').read_text())
     print(f'{directory.name}: {temperature:g} K, {duration_ps:g} ps', flush=True)
+    set_stage(directory.parent, f'thermal history: {directory.name}',
+              temperature_K=float(temperature), duration_ps=float(duration_ps))
     if minimize:
         runner.minimize(cfg['minimization_iterations'])
     rows = []
@@ -239,6 +241,7 @@ def nvt_properties(runner, directory, cfg, mass_Da):
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
     print('300 K NVT: direct Cv and dielectric response', flush=True)
+    set_stage(directory.parent, '300 K NVT: direct Cv and dielectric response')
     # Restart this branch from the completed NPT phase after an interruption.
     runner.md(steps(cfg['equilibration_300_ps'], cfg), ensemble='NVT')
     charges = np.array([a['partial_charge'] for g in runner.host.graphs for a in g['atoms']])
@@ -355,9 +358,11 @@ def solvent_properties(project, cfg, replica, specification):
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
     seed = cfg['seed'] + replica
+    name = specification['name']
     host = load_network(base / 'relaxed_300K.structure.json')
     packed_path = directory / 'packed'
     if not packed_path.exists():
+        set_stage(base, f'solvent {name}: packing', molecules=cfg['solvent_molecules'])
         packed = pack_network(base / 'relaxed_300K.structure.json',
             Solvent(specification['smiles'], name=specification['name']), cfg['solvent_molecules'], seed=seed)
         with tempfile.TemporaryDirectory(prefix='packing_', dir=directory) as temporary:
@@ -366,6 +371,7 @@ def solvent_properties(project, cfg, replica, specification):
             complete.rename(packed_path)
     solvent = load_template(packed_path, 'solvent')
     fe_dir = directory / 'infinite_dilution_free_energy'
+    set_stage(base, f'solvent {name}: insertion free energy', windows=cfg['alchemical_windows'])
     # N=0: insert a noninteracting test molecule in the dry relaxed host, then couple.
     # The endpoint difference contains the matched isolated flexible-molecule reference.
     chemical = run_alchemical(host, solvent, host.positions_nm, 0, host.box_nm, fe_dir,
@@ -387,6 +393,7 @@ def solvent_properties(project, cfg, replica, specification):
         diffusion_min_duration_ps=cfg['diffusion_min_duration_ps'],
         volume_interval_steps=cfg['volume_interval_steps'], volume_fraction=cfg['volume_fraction'])
     md_dir = directory / 'diffusion'
+    set_stage(base, f'solvent {name}: diffusion MD', production_ps=cfg['solvent_production_ps'])
     initial = json.loads((packed_path / 'packed.structure.json').read_text())
     wet = run_fixed_loading(host, solvent, 0., md_dir, config=md_cfg, seed=seed,
         count_override=cfg['solvent_molecules'], initial_state=initial,
@@ -524,18 +531,23 @@ def run(args):
     replicas = [selected] if selected is not None else range(1, cfg['replicates'] + 1)
     for replica in replicas:
         base = project / f'replica_{replica:02d}'
-        with file_lock(base / '.run.lock', blocking=False) as lock:
+        # The lock comes first: a refused duplicate must not overwrite progress/error records.
+        with file_lock(base / '.run.lock', blocking=False) as lock, replica_progress(base):
             write_json(base / 'execution.json', dict(replica=replica, seed=cfg['seed'] + replica,
                 platform=cfg['platform'], cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES')))
             if cfg.get('input_mode') == 'epoxy':
                 from workflows.network_properties.epoxy_pipeline import ensure_network
+                set_stage(base, 'crosslinking: pack, compress, equilibrate and react', seed=cfg['seed'] + replica)
                 ensure_network(project, cfg, replica, lock)
+            set_stage(base, 'dry properties: thermal history')
             dry_properties(project, cfg, replica)
             if cfg['mechanical']:
                 from workflows.network_properties.mechanical import run_mechanical
+                set_stage(base, 'mechanical: elastic constants')
                 run_mechanical(base, cfg, cfg['seed'] + replica)
             if cfg['thermal_conductivity']:
                 from workflows.network_properties.thermal_transport import run_transport
+                set_stage(base, 'thermal conductivity: RNEMD')
                 run_transport(base, cfg, cfg['seed'] + replica)
             for spec in cfg['solvents']:
                 solvent_properties(project, cfg, replica, spec)
@@ -599,6 +611,10 @@ def main(argv=None):
     try:
         args.action(args)
     except (ValueError, OSError, RuntimeError, ImportError, KeyError) as exc:
+        if args.command == 'run':
+            # Keep the traceback: job logs are the only record of where a detached run stopped.
+            import traceback
+            traceback.print_exc()
         print(f'network_properties: {exc}', file=sys.stderr)
         return 1
     return 0

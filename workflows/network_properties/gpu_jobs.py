@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 import sys
@@ -62,6 +63,49 @@ def replica_complete(project, cfg, replica):
         required.append(base / 'thermal_conductivity/result.json')
     required += [base / 'solvents' / s['name'] / 'result.json' for s in cfg['solvents']]
     return all(path.is_file() for path in required)
+
+
+ERROR_PATTERN = re.compile(r'^(?:[\w.]+(?:Error|Exception|Interrupt)\b|network_properties: ).*')
+
+
+def log_section(path, offset=0, limit=2_000_000):
+    """Text appended to a job log since offset (the current attempt), at most limit bytes."""
+    try:
+        with open(path, 'rb') as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(offset, size - limit))
+            return handle.read().decode(errors='replace')
+    except OSError:
+        return ''
+
+
+def failure_summary(text, code):
+    if code < 0:
+        name = signal.Signals(-code).name if -code in signal.valid_signals() else f'signal {-code}'
+        hint = ' (check memory: the kernel OOM killer sends SIGKILL)' if -code == signal.SIGKILL else ''
+        return f'killed by {name}{hint}'
+    errors = [line.strip() for line in text.splitlines() if ERROR_PATTERN.match(line.strip())]
+    return errors[-1] if errors else f'exit code {code}; no exception line in the log'
+
+
+def record_failure(job, code):
+    """Store a one-line cause and write jobs/replica_XX.error.log with this attempt's log tail."""
+    text = log_section(job['log'], job.get('log_offset', 0))
+    job['error'] = failure_summary(text, code)
+    path = Path(job['log']).with_suffix('.error.log')
+    tail = '\n'.join(text.splitlines()[-300:])
+    path.write_text(f'[{now()}] replica={job["replica"]} seed={job["seed"]} returncode={code}\n'
+                    f'cause: {job["error"]}\n--- last 300 log lines of this attempt ---\n{tail}\n')
+    job['error_log'] = str(path)
+
+
+def mark_interrupted(project, job):
+    """A worker killed by a signal cannot close its own progress record."""
+    from workflows.network_properties.execution import read_progress, finish_progress
+    base = Path(project) / f'replica_{job["replica"]:02d}'
+    progress = read_progress(base)
+    if progress and progress.get('state') == 'running':
+        finish_progress(base, 'failed', error=job['error'], error_log=job.get('error_log'))
 
 
 def worker_command(project, replica):
@@ -172,6 +216,7 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
                 log = Path(job['log'])
                 log.parent.mkdir(parents=True, exist_ok=True)
                 try:
+                    job['log_offset'] = log.stat().st_size if log.exists() else 0
                     with log.open('ab') as output:
                         output.write(f'\n[{now()}] replica={job["replica"]} seed={job["seed"]} GPU={device["index"]}\n'.encode())
                         output.flush()
@@ -189,6 +234,12 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
                 if code is not None:
                     job.update(state='completed' if code == 0 else 'failed',
                                returncode=code, finished_at=now())
+                    if code:
+                        try:
+                            record_failure(job, code)
+                            mark_interrupted(project, job)
+                        except OSError as exc:
+                            job['error'] = f'exit code {code}; could not write error log: {exc}'
                     del active[key]
                     save()
             if active:
@@ -246,11 +297,66 @@ def status(args):
     if not path.is_file():
         raise FileNotFoundError(f'No GPU submission found: {project}')
     state = json.loads(path.read_text())
+    from workflows.network_properties.execution import read_progress
     print(f'Project: {project}\nState: {state.get("state", "starting")}')
+    if state.get('state') in ('starting', 'running', 'collecting'):
+        launcher = process_state(state.get('pid'))
+        if launcher in (None, 'Z'):
+            print(f'WARNING: launcher PID {state.get("pid")} is '
+                  f'{"a zombie" if launcher == "Z" else "not running"}; job states below are not '
+                  'being updated. Check each replica, then submit again to resume unfinished replicas.')
     for job in state['jobs']:
-        print(f'replica_{job["replica"]:02d}: {job["state"]:10s} seed={job["seed"]} '
-              f'GPU={job.get("gpu_index", "—")} log={job["log"]}')
+        name = f'replica_{job["replica"]:02d}'
+        print(f'{name}: {job["state"]:10s} seed={job["seed"]} GPU={job.get("gpu_index", "—")} log={job["log"]}')
+        if job['state'] == 'running':
+            alive = process_state(job.get('pid'))
+            if alive is None:
+                print(f'  WARNING: worker PID {job.get("pid")} no longer exists (lost)')
+            elif alive == 'Z':
+                print(f'  WARNING: worker PID {job.get("pid")} exited but was not reaped (zombie)')
+        progress = read_progress(project / name)
+        if progress:
+            stage = progress.get('stage', '—')
+            since = progress.get('finished_at') if progress.get('state') != 'running' else None
+            print(f'  stage: {stage} [{progress.get("state")}] since {progress.get("started_at")} '
+                  f'({elapsed(progress.get("started_at"), since)})')
+            if progress.get('error'):
+                print(f'  error: {progress["error"]}\n  error log: {progress.get("error_log")}')
+        text = log_section(job['log'], job.get('log_offset', 0), limit=200_000)
+        cycles = CYCLE_PATTERN.findall(text)
+        crosslinking = (progress or {}).get('stage', '').startswith('crosslinking')
+        if cycles and crosslinking and job['state'] == 'running':
+            cycle, conversion = cycles[-1]
+            print(f'  crosslinking: cycle {cycle}, conversion {conversion}')
+        last = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), None)
+        if last and job['state'] == 'running':
+            print(f'  last log: {last[:200]}')
+        if job.get('error'):
+            print(f'  cause: {job["error"]}\n  job error log: {job.get("error_log")}')
     return state
+
+
+CYCLE_PATTERN = re.compile(r'reaction cycle completed \| cycle=(\d+) .*?conversion=([\d.]+%)')
+
+
+def process_state(pid):
+    """Linux process state letter ('R', 'S', 'Z', ...), or None when the PID is gone."""
+    if not pid:
+        return None
+    try:
+        return Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def elapsed(start, end=None):
+    try:
+        begin = datetime.fromisoformat(start)
+        finish = datetime.fromisoformat(end) if end else datetime.now(timezone.utc)
+    except (TypeError, ValueError):
+        return '—'
+    seconds = int((finish - begin).total_seconds())
+    return f'{seconds // 3600}h{seconds % 3600 // 60:02d}m{seconds % 60:02d}s'
 
 
 if __name__ == '__main__':
