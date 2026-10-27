@@ -41,12 +41,19 @@ def configure(args):
         fixed_reaction_cutoff=getattr(args, 'fixed_reaction_cutoff', None) or None,
         minimization_iterations=getattr(args, 'reaction_minimization_iterations', None),
         post_reaction_md_steps=getattr(args, 'post_reaction_md_steps', None),
-        relaxation_stages=getattr(args, 'relaxation_stages', None))
+        relaxation_stages=getattr(args, 'relaxation_stages', None),
+        stop_after_idle_cycles=getattr(args, 'stop_after_idle_cycles', None),
+        template_workers=getattr(args, 'template_workers', None),
+        reaction_minimization_radius=getattr(args, 'reaction_minimization_radius', None),
+        density=getattr(args, 'packing_density', None),
+        final_relaxation_steps=getattr(args, 'final_relaxation_steps', None),
+        final_md_steps=getattr(args, 'final_md_steps', None))
     options.update({k:v for k,v in overrides.items() if v is not None})
     if overrides['reaction_cutoff'] is None:
         options['reaction_cutoff'] = min(options['reaction_cutoff'], options['max_reaction_cutoff'])
     if args.smoke:
-        options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2,
+        options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2, template_workers=1,
+            final_relaxation_steps=2, final_md_steps=2,
             max_reactions_per_cycle=1, reaction_cutoff=10., max_reaction_cutoff=10.,
             minimization_iterations=100)
         if overrides['total_atoms'] is None:
@@ -91,9 +98,11 @@ def validate(cfg):
     if merged['relaxation_stages'] is not None:
         cycle_stages(merged['relaxation_stages'], temperature=merged['temperature'],
                      pressure_atm=merged['pressure_atm'])
-    for name in ('post_reaction_md_steps', 'minimization_iterations'):
-        if type(merged[name]) is not int or merged[name] < 0:
-            raise ValueError(f'crosslinking.{name} must be an integer >= 0')
+    for name, minimum in (('post_reaction_md_steps', 0), ('minimization_iterations', 0),
+                          ('final_relaxation_steps', 0), ('final_md_steps', 0),
+                          ('stop_after_idle_cycles', 0), ('template_workers', 1)):
+        if type(merged[name]) is not int or merged[name] < minimum:
+            raise ValueError(f'crosslinking.{name} must be an integer >= {minimum}')
     options = merged
     if type(options['total_atoms']) is not int or options['total_atoms'] < 1:
         raise ValueError('crosslinking.total_atoms must be a positive integer')

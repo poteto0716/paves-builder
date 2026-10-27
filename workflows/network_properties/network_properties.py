@@ -153,7 +153,9 @@ def new(args):
                               'activation_yaml', 'reactions_yaml', 'compression_pressure_mpa',
                               'compression_steps', 'reaction_cutoff', 'max_reaction_cutoff',
                               'reaction_minimization_iterations', 'post_reaction_md_steps',
-                              'relaxation_stages')
+                              'relaxation_stages', 'stop_after_idle_cycles', 'template_workers',
+                              'reaction_minimization_radius', 'packing_density',
+                              'final_relaxation_steps', 'final_md_steps')
         if (any(getattr(args, name, None) is not None for name in construction_flags)
                 or args.save_trajectory or args.fixed_reaction_cutoff):
             raise ValueError('--network cannot be combined with epoxy construction options')
@@ -581,6 +583,12 @@ def main(argv=None):
     starts.add_argument('--activation-count', type=int)
     starts.add_argument('--activation-fraction', type=float)
     create.add_argument('--max-reactions-per-cycle', type=int)
+    create.add_argument('--final-relaxation-steps', type=int,
+                        help='after crosslinking: NVT steps at 0.1 fs before the final MD (default 1000)')
+    create.add_argument('--final-md-steps', type=int,
+                        help='after crosslinking: NPT steps at 1 fs and 1 atm before saving (default 1000000 = 1 ns)')
+    create.add_argument('--packing-density', type=float,
+                        help='initial epoxy packing density in g/cm3 before compression (default 0.5)')
     create.add_argument('--compression-pressure-mpa', type=float,
                         help='pre-crosslinking compression NPT pressure in MPa (default 200)')
     create.add_argument('--compression-steps', type=int,
@@ -588,15 +596,21 @@ def main(argv=None):
     create.add_argument('--reaction-cutoff', type=float,
                         help='initial reaction search distance in angstrom (default 5, capped by the maximum)')
     create.add_argument('--max-reaction-cutoff', type=float,
-                        help='largest search distance after automatic growth, angstrom (default 10)')
+                        help='largest search distance after automatic growth, angstrom (default 7)')
     create.add_argument('--fixed-reaction-cutoff', action='store_true',
                         help='keep the search distance at --reaction-cutoff')
     create.add_argument('--reaction-minimization-iterations', type=int,
                         help='crosslinking minimization iterations, initial and after each reaction (default 2000)')
+    create.add_argument('--reaction-minimization-radius', type=float,
+                        help='minimize only atoms within this many angstrom of each reaction (default 12; 0 whole system)')
     create.add_argument('--post-reaction-md-steps', type=int,
                         help='NVT steps at 0.1 fs after minimization, before reactions are committed (default 0)')
     create.add_argument('--relaxation-stages', type=relaxation_stages_argument,
-                        help='post-reaction MD per cycle: JSON text or a JSON/YAML file (default NVT 0.1 fs x 1000, NPT 1 fs x 1000)')
+                        help='post-reaction MD per cycle: JSON text or a JSON/YAML file (default NVT 0.1 fs x 10000, NPT 1 fs x 1000)')
+    create.add_argument('--stop-after-idle-cycles', type=int,
+                        help='end crosslinking after this many zero-reaction cycles at the largest search distance (default 200; 0 never)')
+    create.add_argument('--template-workers', type=int,
+                        help='processes computing new reaction templates in parallel (default 4; 1 serial)')
     create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
     create.add_argument('--activation-yaml', type=Path)
     create.add_argument('--reactions-yaml', type=Path)

@@ -130,7 +130,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
                 '--project', 'kekule', '--smiles', kekule, '--total-atoms', '400', '--activation-count', '1',
                 '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
-                '--nvt-steps', '2', '--npt-steps', '2', '--max-reactions-per-cycle', '1',
+                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--max-reactions-per-cycle', '1',
                 '--reaction-cutoff', '10', '--max-reaction-cutoff', '10', '--minimization-iterations', '100'],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
@@ -156,6 +156,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--post-reaction-md-steps', '2',
+                '--final-relaxation-steps', '3', '--final-md-steps', '4',
                 '--relaxation-stages', json.dumps(stages)],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
@@ -167,6 +168,13 @@ class PublicReactiveWorkflows(unittest.TestCase):
             cycle, = json.loads((output / 'cycles.json').read_text())
             self.assertGreaterEqual(cycle['reactions'], 1)
             self.assertEqual(len(cycle['md_stages']), 3)
+            self.assertEqual((settings['stop_after_idle_cycles'], settings['template_workers']), (200, 4))
+            self.assertEqual(json.loads((output / 'metrics.json').read_text())['stop_reason'], 'max_cycles')
+            # Final structure follows 0.1 fs relaxation and 1 atm MD after the last reaction.
+            self.assertTrue((output / 'reacted.structure.json').is_file())
+            self.assertEqual((settings['final_relaxation_steps'], settings['final_md_steps']), (3, 4))
+            self.assertEqual(json.loads((output / 'final.structure.json').read_text())['graphs'][0]['bonds'],
+                             json.loads((output / 'reacted.structure.json').read_text())['graphs'][0]['bonds'])
 
     def test_crosslink_water_pack_and_md_resume(self):
         import numpy as np
@@ -185,7 +193,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'epoxy',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100'], project)
             network = project / 'results/epoxy/final.structure.json'
@@ -229,7 +237,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             # Opt-in retains visualization output as well as the final network.
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'with_trajectory',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--save-trajectory',
                 '--template-cache', network.parent / 'reaction_templates'], project)
@@ -238,7 +246,8 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertTrue(list((visual / 'frames').glob('*.data.gz')))
             self.assertTrue(list((visual / 'cycles').glob('cycle_*.structure.json')))
             self.assertEqual(json.loads((visual / 'final.structure.json').read_text())['graphs'], dry['graphs'])
-            self.assertEqual(json.loads((visual / 'metrics.json').read_text())['frames'], 3)
+            # initial, equilibrated, cycle end, final relaxed
+            self.assertEqual(json.loads((visual / 'metrics.json').read_text())['frames'], 4)
 
 
 if __name__ == '__main__':

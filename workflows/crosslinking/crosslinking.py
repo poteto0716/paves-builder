@@ -3,7 +3,7 @@
 packing後の加圧NPT: 300 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
 初期NPT: 300 K、1 atm、1 fs × 1,000,000 step = 1 ns。
 
-各cycle: 反応 → opt → NVT (300 K, 0.1 fs, 1000 step)
+各cycle: 反応 → opt → NVT (300 K, 0.1 fs, 10000 step)
                     → NPT (300 K, 1 atm, 1 fs, 1000 step)。
 反応後の緩和は--relaxation-stages（JSON文字列かJSON/YAMLファイル）で任意の段に置き換えられる。
 OpenMMはCUDA/mixedが既定。CPUでは --platform CPU を指定する。
@@ -11,7 +11,7 @@ OH*は中性graphにcationic_activityを付けた既存のproxy表現。
 OVITO軌跡とcycle別構造は既定では保存しない。--save-trajectoryで有効にする。
 保存先はカレントのresults/<project>。既存projectの上書きは --force が必要。
 activation.yaml／reactions.yamlはカレントディレクトリから読み込む。
-反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大10 Å（--max-reaction-cutoff）。
+反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大7 Å（--max-reaction-cutoff）。
 反応後の割り当ては局所Sageフラグメントの電荷テンプレートを再利用する。
 """
 import argparse
@@ -152,16 +152,18 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
 
 def run(project, *, force=False, compression_steps=50_000, compression_pressure_mpa=200.,
         equilibration_steps=1_000_000, smiles=DEFAULT_SMILES, total_atoms=DEFAULT_TOTAL_ATOMS,
-        atom_count_mode=DEFAULT_ATOM_COUNT_MODE, density=.8, activation_count=None, activation_fraction=None,
+        atom_count_mode=DEFAULT_ATOM_COUNT_MODE, density=.5, activation_count=None, activation_fraction=None,
         platform='CUDA', cycles=DEFAULT_CYCLES, temperature=300.,
         equilibration_timestep=1.,
-        nvt_timestep=.1, nvt_steps=1000, npt_timestep=1., npt_steps=1000,
+        nvt_timestep=.1, nvt_steps=10000, npt_timestep=1., npt_steps=1000,
         pressure_atm=1., minimization_iterations=2000,
         target_conversion=DEFAULT_TARGET_CONVERSION, max_reactions_per_cycle=None, seed=31415,
-        reaction_cutoff=5., max_reaction_cutoff=10., cutoff_growth_factor=1.2,
+        reaction_cutoff=5., max_reaction_cutoff=7., cutoff_growth_factor=1.2,
         cutoff_zero_cycles=2, fixed_reaction_cutoff=False,
-        relaxation_stages=None, post_reaction_md_steps=0,
-        reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
+        relaxation_stages=None, post_reaction_md_steps=0, stop_after_idle_cycles=200,
+        reaction_minimization_radius=12., final_relaxation_steps=1000, final_md_steps=1_000_000,
+        pack_relax=50, pack_postrelax=400,
+        template_workers=4, reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
         max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
         save_trajectory=False):
     """packingから反応MD、最終構造の保存まで実行する。
@@ -173,7 +175,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     total_atoms: 初期化後の目標総原子数（H込み、既定20000）。above（既定）は
       目標を厳密に超える最小の整数分子数、nearestは最も近い整数分子数、
       floorは目標以下、exactは厳密一致（到達不能ならエラー）。
-    density: packing時のg/cm^3。temperature: K。timestep: fs。
+    density: packing時のg/cm^3（既定0.5）。0.8で詰めた嵩高い芳香族エポキシは、200 MPa・1 fsの加圧NPTで
+      半数がNaNになった（0.5では0/4）。加圧後は約1.1 g/cm^3まで縮む。temperature: K。timestep: fs。
     pressure_atm: atm（ライブラリのbarへ換算して渡す）。
     compression_steps: 加圧NPTのstep数（既定50,000）。equilibration_timestep刻みで既定50 ps。
       0なら加圧しない。compression_pressure_mpa: 加圧NPTの圧力 MPa（既定200）。
@@ -190,6 +193,18 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     max_reaction_cutoffで頭打ち。固定距離ならfixed_reaction_cutoff=True。
     遠い対を無理に結合させると歪んだ構造になりやすいので、長いrunでは上限を5〜6 Åに下げる。
     relaxation_stages: 各cycleの反応後MDの段リスト（cycle_stages参照）。Noneならnvt_*/npt_*の2段。
+    stop_after_idle_cycles: 探索距離が上限（固定距離ならその値）のまま反応0件のcycleが
+      この回数続いたら終了する（既定200、0で無効）。活性点が網目に埋もれて動けなくなった後の空回りを防ぐ。
+    reaction_minimization_radius: 反応後の最小化で動かす範囲 Å（既定12）。反応原子からこの距離内と
+      更新した結合近傍だけを最小化し、他は固定する。0なら系全体を最小化する（系全体の熱構造も消える）。
+    pack_relax / pack_postrelax: packing中と後のnativeの局所緩和（PAVES既定と同じ50 sweep、400）。
+      0にすると生の成長座標が残り、結合が環を貫通（ring spearing）して最小化でもほどけない。
+      packing後に環を貫通する結合が1本でもあれば停止する。
+    final_relaxation_steps / final_md_steps: 反応終了後、最終構造を保存する前に
+      NVT 0.1 fs × final_relaxation_steps（既定1000）→ NPT 1 atm・1 fs × final_md_steps（既定1,000,000 = 1 ns）。
+      反応を終えた直後の構造はreacted.structure.json、緩和後をfinal.*として保存する。0で各段を省略。
+    template_workers: 未知の反応テンプレートを並列計算するプロセス数（既定4、1で逐次）。
+      結果は逐次計算と同一。1プロセスあたり約1 GBのメモリを使う。
     post_reaction_md_steps: 反応直後の最小化に続けて、反応の確定前にnvt_timestep刻みで
       流すNVT step数（既定0）。commit前に伸びた新結合をならす。ここで非有限エネルギーに
       なると反応はcommitされず、計算はReactionTransactionErrorで止まる。
@@ -226,7 +241,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     bank = output / 'reaction_templates' if template_cache is None else Path(template_cache).absolute()
     field = (LocalSageForceField(p.SageForceField(version='2.3.0'), radius=local_radius,
              context_radius=local_context_radius, max_fragment_atoms=max_fragment_atoms, cache_dir=bank,
-             require_templates=require_reaction_templates)
+             require_templates=require_reaction_templates, workers=template_workers)
              if reaction_assignment == 'local_templates' else p.SageForceField(version='2.3.0'))
 
     from rdkit import Chem
@@ -245,10 +260,18 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                      nvt_steps=nvt_steps, npt_steps=npt_steps)
     _number(pressure_atm, 'pressure_atm')
     _number(density, 'density')
+    _number(reaction_minimization_radius, 'reaction_minimization_radius')
+    if reaction_minimization_radius < 0:
+        raise ValueError('reaction_minimization_radius must be >= 0')
     for name, value, minimum in (('cycles', cycles, 0),
                                  ('minimization_iterations', minimization_iterations, 0),
                                  ('compression_steps', compression_steps, 0),
-                                 ('post_reaction_md_steps', post_reaction_md_steps, 0)):
+                                 ('post_reaction_md_steps', post_reaction_md_steps, 0),
+                                 ('stop_after_idle_cycles', stop_after_idle_cycles, 0),
+                                 ('template_workers', template_workers, 1),
+                                 ('final_relaxation_steps', final_relaxation_steps, 0),
+                                 ('final_md_steps', final_md_steps, 0),
+                                 ('pack_relax', pack_relax, 0), ('pack_postrelax', pack_postrelax, 0)):
         if type(value) is not int or value < minimum:
             raise ValueError(f'{name} must be an integer >= {minimum}')
     if target_conversion is not None and not 0 <= target_conversion <= 1:
@@ -324,12 +347,18 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         density=density, temperature=temperature,
         forcefield='sage', forcefield_version='2.3.0',
         platform=platform, precision=precision, seed=seed,
-        trials=20, relax=0, postrelax=0,
+        trials=20, relax=pack_relax, postrelax=pack_postrelax,
     )
     packed_atoms = structure.n_atoms
+    structure.write_json(output / 'before_activation.structure.json')
+    piercing = structure.report.get('ring_piercing_bonds')
+    if piercing is None:
+        raise RuntimeError('This polypaves does not report ring piercing after packing')
+    if piercing:
+        raise RuntimeError(f'{piercing} bonds pierce rings after packing; increase --pack-postrelax/--pack-relax '
+                           'or lower --density (see before_activation.structure.json)')
     if packed_atoms != plan['packed_atoms']:
         raise RuntimeError('Packed atom count differs from the size plan')
-    structure.write_json(output / 'before_activation.structure.json')
     forcefield = field.base if isinstance(field, LocalSageForceField) else field
     initializer = ActivationInitializer(structure, forcefield=forcefield, seed=seed)
     bridge = OpenMMBridge(platform=platform, precision=precision,
@@ -371,6 +400,11 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     equilibration=asdict(equilibration),
                     cycle_md_stages=[asdict(stage) for stage in stages], cycles=cycles,
                     relaxation_stages=relaxation_stages, post_reaction_md_steps=post_reaction_md_steps,
+                    stop_after_idle_cycles=stop_after_idle_cycles, template_workers=template_workers,
+                    reaction_minimization_radius_A=reaction_minimization_radius or None,
+                    final_relaxation_steps=final_relaxation_steps, final_md_steps=final_md_steps,
+                    pack_relax=pack_relax, pack_postrelax=pack_postrelax,
+                    ring_piercing_bonds_after_packing=piercing,
                     save_trajectory=save_trajectory,
                     output_interval_cycles=1 if save_trajectory else None,
                     minimization_iterations=minimization_iterations,
@@ -438,10 +472,26 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         result = runner.run(md_steps_per_cycle=0, max_cycles=cycles,
             max_reactions_per_cycle=max_reactions_per_cycle, minimize_after_reaction=True,
             minimization_max_iterations=minimization_iterations,
-            post_reaction_md_steps=post_reaction_md_steps, cycle_md_stages=stages, target_conversion=target_conversion,
+            post_reaction_md_steps=post_reaction_md_steps, cycle_md_stages=stages,
+            stop_after_idle_cycles=stop_after_idle_cycles or None,
+            minimization_radius=reaction_minimization_radius or None, target_conversion=target_conversion,
             history_path=output / 'reaction_history.jsonl', on_cycle=save_cycle)
         save_summary(runner)
+        # 反応直後の構造を残し、0.1 fsの緩和と1 atmのMDを経た構造を最終構造とする。
+        runner.structure.write_json(output / 'reacted.structure.json')
+        final_stages = []
+        if final_relaxation_steps:
+            final_stages.append(MDStage('NVT', steps=final_relaxation_steps, timestep=.1, temperature=temperature))
+        if final_md_steps:
+            final_stages.append(MDStage('NPT', steps=final_md_steps, timestep=1., temperature=temperature,
+                                        pressure=pressure_bar))
+        if final_stages:
+            runner.equilibrate(final_stages)
+            write_frame(runner, phase='final relaxed')
+        save_summary(runner)
         save_structure(runner, output / 'final')
+    if isinstance(field, LocalSageForceField):
+        field.close()
     return result
 
 
@@ -455,7 +505,8 @@ def main():
     parser.add_argument('--atom-count-mode', choices=('above', 'nearest', 'floor', 'exact'),
                         default=DEFAULT_ATOM_COUNT_MODE,
                         help='原子数の丸め方。aboveは目標を超える最小分子数（既定above）')
-    parser.add_argument('--density', type=float, default=.8)
+    parser.add_argument('--density', type=float, default=.5,
+                        help='packing時の密度 g/cm^3（既定0.5。加圧NPTで縮める）')
     starts = parser.add_mutually_exclusive_group()
     starts.add_argument('--activation-count', type=int)
     starts.add_argument('--activation-fraction', type=float, help='開始点の割合。省略時はactivation.yamlを使用')
@@ -475,7 +526,7 @@ def main():
                         help='初期NPTのstep数（既定1000000）。既定1 fs刻みで1 ns')
     parser.add_argument('--equilibration-timestep', type=float, default=1.)
     parser.add_argument('--nvt-timestep', type=float, default=.1)
-    parser.add_argument('--nvt-steps', type=int, default=1000)
+    parser.add_argument('--nvt-steps', type=int, default=10000)
     parser.add_argument('--npt-timestep', type=float, default=1.)
     parser.add_argument('--npt-steps', type=int, default=1000)
     parser.add_argument('--pressure-atm', type=float, default=1.)
@@ -485,7 +536,7 @@ def main():
     parser.add_argument('--max-reactions-per-cycle', type=int, help='1 cycleの最大反応数。指定時はYAMLのルール上限も上書き')
     parser.add_argument('--reaction-cutoff', type=float,
                         help='開始時の反応探索距離 Å（YAMLを上書き、既定5。上限より大きければ上限）')
-    parser.add_argument('--max-reaction-cutoff', type=float, default=10., help='探索距離の上限 Å（既定10）')
+    parser.add_argument('--max-reaction-cutoff', type=float, default=7., help='探索距離の上限 Å（既定7）')
     parser.add_argument('--cutoff-growth-factor', type=float, default=1.2, help='0件が続いた際の距離倍率（既定1.2）')
     parser.add_argument('--cutoff-zero-cycles', type=int, default=2, help='距離拡大までの連続0件cycle数（既定2）')
     parser.add_argument('--fixed-reaction-cutoff', action='store_true', help='距離をreaction-cutoffに固定し、自動拡大を無効化')
@@ -493,6 +544,18 @@ def main():
                         help='各cycleの反応後MD。JSON文字列かJSON/YAMLファイル。指定時は--nvt-*/--npt-*を使わない')
     parser.add_argument('--post-reaction-md-steps', type=int, default=0,
                         help='反応確定前、最小化の後に流すNVT step数（--nvt-timestep刻み、既定0）')
+    parser.add_argument('--stop-after-idle-cycles', type=int, default=200,
+                        help='探索距離が上限のまま反応0件がこのcycle数続いたら終了（既定200、0で無効）')
+    parser.add_argument('--reaction-minimization-radius', type=float, default=12.,
+                        help='反応後の最小化で動かす範囲 Å（既定12、0で系全体）')
+    parser.add_argument('--pack-relax', type=int, default=50, help='packing中の局所緩和sweep数（既定50）')
+    parser.add_argument('--pack-postrelax', type=int, default=400, help='packing後の局所緩和（既定400）')
+    parser.add_argument('--final-relaxation-steps', type=int, default=1000,
+                        help='反応終了後のNVT 0.1 fsのstep数（既定1000、0で省略）')
+    parser.add_argument('--final-md-steps', type=int, default=1_000_000,
+                        help='その後のNPT 1 atm・1 fsのstep数（既定1000000 = 1 ns、0で省略）')
+    parser.add_argument('--template-workers', type=int, default=4,
+                        help='未知の反応テンプレートを並列計算するプロセス数（既定4、1で逐次）')
     parser.add_argument('--reaction-assignment', choices=('local_templates', 'whole'), default='local_templates',
                         help='反応後の割り当て方式。既定は局所フラグメント電荷の転写')
     parser.add_argument('--local-radius', type=int, default=5, help='更新対象の結合本数（既定5）')

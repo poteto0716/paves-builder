@@ -76,7 +76,7 @@ docker compose run --rm jupyter python docker/smoke_test.py
 # 架橋構築の短いCPU動作確認
 docker compose run --rm -w /workspace/workflows/crosslinking jupyter \
   python crosslinking.py --project docker_smoke --total-atoms 500 --activation-count 1 \
-  --platform CPU --compression-steps 2 --equilibration-steps 2 --cycles 1 --nvt-steps 2 --npt-steps 2 \
+  --platform CPU --compression-steps 2 --equilibration-steps 2 --cycles 1 --nvt-steps 2 --npt-steps 2 --final-relaxation-steps 2 --final-md-steps 2 \
   --max-reactions-per-cycle 1 --reaction-cutoff 10 --max-reaction-cutoff 10 \
   --minimization-iterations 100
 

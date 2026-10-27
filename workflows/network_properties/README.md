@@ -38,13 +38,13 @@ SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別�
 作成済みのproject.jsonにもすべての設定を記録します。
 架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
 トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
-packing後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
+packing（既定0.5 g/cm³、`--packing-density`。PAVESの局所緩和あり、環を貫通する結合があれば停止）後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
 `--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
 `--epoxy-smiles`、`--total-atoms`、`--target-conversion`、`--cycles`、
 `--activation-fraction`または`--activation-count`で変更できます。
-反応距離の上限は`--max-reaction-cutoff`（既定10 Å。おかしな構造が出る長いrunでは5 Å程度）で変えられます。
+反応距離の上限は`--max-reaction-cutoff`（既定7 Å）で変えられます。
 開始距離は`--reaction-cutoff`、距離の固定は`--fixed-reaction-cutoff`です。
-反応後の緩和は`--reaction-minimization-iterations`、`--post-reaction-md-steps`、
+反応後の緩和は`--reaction-minimization-iterations`、`--reaction-minimization-radius`（反応点から何Å以内を最小化するか。既定12、0で系全体）、`--post-reaction-md-steps`、
 `--relaxation-stages`（JSON文字列かJSON/YAMLファイル）で設定します。
 段の書式は[crosslinking/README.md](../crosslinking/README.md#反応距離の上限と反応後の緩和)を参照してください。
 例:
@@ -56,7 +56,12 @@ python workflows/network_properties/network_properties.py new workflows/network_
   --relaxation-stages workflows/crosslinking/relaxation.example.yaml
 ```
 
+反応終了後は0.1 fs×1000 stepの緩和と1 atm・1 nsのMD（`--final-relaxation-steps`、`--final-md-steps`）を経て最終構造を保存します。
 YAMLファイルの中身は`new`の時点で`project.json`に取り込まれます。そのため、後でファイルを書き換えても既存projectには影響しません。
+
+活性点が網目に埋もれて反応が止まった後の空回りは、`--stop-after-idle-cycles`（既定200、0で無効）で打ち切ります。
+未知の反応テンプレートは`--template-workers`（既定4）個のプロセスで並列に計算します。
+詳細は[crosslinking/README.md](../crosslinking/README.md#計算速度)を参照してください。
 これらは`project.json`の`crosslinking`（`max_reaction_cutoff`、`minimization_iterations`、
 `post_reaction_md_steps`、`relaxation_stages`）にも記録されます。初回run前なら、そこを直接編集しても構いません。
 独自の反応ルールは`--activation-yaml`、`--reactions-yaml`で渡します。
