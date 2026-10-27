@@ -117,6 +117,12 @@ def validate(cfg):
         validate_epoxy(cfg)
 
 
+def relaxation_stages_argument(value):
+    # Imported here so that status/submit do not load polypaves for argument parsing.
+    from workflows.crosslinking.crosslinking import load_relaxation_stages
+    return load_relaxation_stages(value)
+
+
 def new(args):
     if args.project.exists():
         raise FileExistsError(f'Project exists: {args.project}')
@@ -144,8 +150,12 @@ def new(args):
     if args.network is not None:
         construction_flags = ('total_atoms', 'atom_count_mode', 'cycles', 'target_conversion',
                               'activation_count', 'activation_fraction', 'max_reactions_per_cycle',
-                              'activation_yaml', 'reactions_yaml')
-        if any(getattr(args, name, None) is not None for name in construction_flags) or args.save_trajectory:
+                              'activation_yaml', 'reactions_yaml', 'compression_pressure_mpa',
+                              'compression_steps', 'reaction_cutoff', 'max_reaction_cutoff',
+                              'reaction_minimization_iterations', 'post_reaction_md_steps',
+                              'relaxation_stages')
+        if (any(getattr(args, name, None) is not None for name in construction_flags)
+                or args.save_trajectory or args.fixed_reaction_cutoff):
             raise ValueError('--network cannot be combined with epoxy construction options')
         source = args.network.resolve()
         data = json.loads(source.read_text())
@@ -575,6 +585,18 @@ def main(argv=None):
                         help='pre-crosslinking compression NPT pressure in MPa (default 200)')
     create.add_argument('--compression-steps', type=int,
                         help='compression NPT steps at 1 fs (default 50000 = 50 ps; 0 disables)')
+    create.add_argument('--reaction-cutoff', type=float,
+                        help='initial reaction search distance in angstrom (default 5, capped by the maximum)')
+    create.add_argument('--max-reaction-cutoff', type=float,
+                        help='largest search distance after automatic growth, angstrom (default 10)')
+    create.add_argument('--fixed-reaction-cutoff', action='store_true',
+                        help='keep the search distance at --reaction-cutoff')
+    create.add_argument('--reaction-minimization-iterations', type=int,
+                        help='crosslinking minimization iterations, initial and after each reaction (default 2000)')
+    create.add_argument('--post-reaction-md-steps', type=int,
+                        help='NVT steps at 0.1 fs after minimization, before reactions are committed (default 0)')
+    create.add_argument('--relaxation-stages', type=relaxation_stages_argument,
+                        help='post-reaction MD per cycle: JSON text or a JSON/YAML file (default NVT 0.1 fs x 1000, NPT 1 fs x 1000)')
     create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
     create.add_argument('--activation-yaml', type=Path)
     create.add_argument('--reactions-yaml', type=Path)

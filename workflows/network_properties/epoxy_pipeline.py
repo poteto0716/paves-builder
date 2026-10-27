@@ -35,8 +35,16 @@ def configure(args):
         max_reactions_per_cycle=getattr(args, 'max_reactions_per_cycle', None),
         save_trajectory=getattr(args, 'save_trajectory', False),
         compression_pressure_mpa=getattr(args, 'compression_pressure_mpa', None),
-        compression_steps=getattr(args, 'compression_steps', None))
+        compression_steps=getattr(args, 'compression_steps', None),
+        reaction_cutoff=getattr(args, 'reaction_cutoff', None),
+        max_reaction_cutoff=getattr(args, 'max_reaction_cutoff', None),
+        fixed_reaction_cutoff=getattr(args, 'fixed_reaction_cutoff', None) or None,
+        minimization_iterations=getattr(args, 'reaction_minimization_iterations', None),
+        post_reaction_md_steps=getattr(args, 'post_reaction_md_steps', None),
+        relaxation_stages=getattr(args, 'relaxation_stages', None))
     options.update({k:v for k,v in overrides.items() if v is not None})
+    if overrides['reaction_cutoff'] is None:
+        options['reaction_cutoff'] = min(options['reaction_cutoff'], options['max_reaction_cutoff'])
     if args.smoke:
         options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2,
             max_reactions_per_cycle=1, reaction_cutoff=10., max_reaction_cutoff=10.,
@@ -71,8 +79,22 @@ def validate(cfg):
     if cfg['platform'] not in ('CPU', 'CUDA'):
         raise ValueError('Epoxy construction supports CPU or CUDA')
     options = cfg['crosslinking']
-    if set(options) != set(defaults()):
-        raise ValueError('crosslinking settings must match the public crosslinking API options')
+    known = defaults()
+    # Older projects may lack newer options; crosslinking.py then uses its defaults.
+    if set(options) - set(known):
+        raise ValueError(f'unknown crosslinking settings: {sorted(set(options) - set(known))}')
+    merged = {**known, **options}
+    from workflows.crosslinking.crosslinking import cycle_stages
+    from polypaves.reaction import AdaptiveReactionCutoff
+    AdaptiveReactionCutoff(initial_cutoff=merged['reaction_cutoff'], maximum_cutoff=merged['max_reaction_cutoff'],
+        growth_factor=merged['cutoff_growth_factor'], zero_reaction_cycles=merged['cutoff_zero_cycles'])
+    if merged['relaxation_stages'] is not None:
+        cycle_stages(merged['relaxation_stages'], temperature=merged['temperature'],
+                     pressure_atm=merged['pressure_atm'])
+    for name in ('post_reaction_md_steps', 'minimization_iterations'):
+        if type(merged[name]) is not int or merged[name] < 0:
+            raise ValueError(f'crosslinking.{name} must be an integer >= 0')
+    options = merged
     if type(options['total_atoms']) is not int or options['total_atoms'] < 1:
         raise ValueError('crosslinking.total_atoms must be a positive integer')
     if type(options['cycles']) is not int or options['cycles'] < 0:
@@ -104,6 +126,8 @@ def build_command(project, cfg, replica):
         if value is None or value is False:
             continue
         flag = '--' + key.replace('_', '-')
+        if isinstance(value, (list, dict)):
+            value = json.dumps(value)
         command += [flag] if value is True else [flag, str(value)]
     # Only this pipeline-owned, incomplete construction is restarted. Completed
     # builds are retained and verified by ensure_network before reaching here.

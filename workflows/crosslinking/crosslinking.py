@@ -5,12 +5,13 @@ packing後の加圧NPT: 300 K、200 MPa、1 fs × 50,000 step = 50 ps（void除�
 
 各cycle: 反応 → opt → NVT (300 K, 0.1 fs, 1000 step)
                     → NPT (300 K, 1 atm, 1 fs, 1000 step)。
+反応後の緩和は--relaxation-stages（JSON文字列かJSON/YAMLファイル）で任意の段に置き換えられる。
 OpenMMはCUDA/mixedが既定。CPUでは --platform CPU を指定する。
 OH*は中性graphにcationic_activityを付けた既存のproxy表現。
 OVITO軌跡とcycle別構造は既定では保存しない。--save-trajectoryで有効にする。
 保存先はカレントのresults/<project>。既存projectの上書きは --force が必要。
 activation.yaml／reactions.yamlはカレントディレクトリから読み込む。
-反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大10 Å。
+反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大10 Å（--max-reaction-cutoff）。
 反応後の割り当ては局所Sageフラグメントの電荷テンプレートを再利用する。
 """
 import argparse
@@ -37,6 +38,46 @@ DEFAULT_TOTAL_ATOMS = 20_000
 DEFAULT_ATOM_COUNT_MODE = 'above'
 DEFAULT_CYCLES = 5000
 DEFAULT_TARGET_CONVERSION = .995
+STAGE_KEYS = {'ensemble', 'steps', 'timestep', 'temperature', 'pressure_atm'}
+
+
+def load_relaxation_stages(value):
+    """JSON文字列、またはJSON/YAMLファイルのパスから反応後緩和の段リストを読む。
+
+    例: [{"ensemble": "NVT", "steps": 5000, "timestep": 0.1},
+         {"ensemble": "NPT", "steps": 20000, "timestep": 1.0, "pressure_atm": 1}]
+    ファイルはリストそのもの、または{stages: [...]}。
+    """
+    if value is None or isinstance(value, list):
+        return value
+    import yaml
+    path = Path(value)
+    data = yaml.safe_load(path.read_text() if path.is_file() else value)
+    if isinstance(data, dict) and set(data) == {'stages'}:
+        data = data['stages']
+    return data
+
+
+def cycle_stages(spec, *, temperature, pressure_atm):
+    """段リストをMDStageへ変換する。timestep: fs、temperature: K（省略時は全体の温度）、
+    pressure_atm: NPTのみ（省略時は全体のpressure_atm）。"""
+    if not isinstance(spec, list) or not spec:
+        raise ValueError('relaxation_stages must be a non-empty list of stages')
+    stages = []
+    for index, entry in enumerate(spec, 1):
+        if not isinstance(entry, dict) or not {'ensemble', 'steps', 'timestep'} <= set(entry) \
+                or set(entry) - STAGE_KEYS:
+            raise ValueError(f'relaxation stage {index} needs ensemble, steps, timestep and may add '
+                             f'temperature, pressure_atm: {entry!r}')
+        ensemble = str(entry['ensemble']).upper()
+        if type(entry['steps']) is not int or entry['steps'] < 1:
+            raise ValueError(f'relaxation stage {index}: steps must be a positive integer')
+        if ensemble == 'NVT' and 'pressure_atm' in entry:
+            raise ValueError(f'relaxation stage {index}: NVT must not set pressure_atm')
+        pressure = entry.get('pressure_atm', pressure_atm) * 1.01325 if ensemble == 'NPT' else None
+        stages.append(MDStage(ensemble, steps=entry['steps'], timestep=entry['timestep'],
+                              temperature=entry.get('temperature', temperature), pressure=pressure))
+    return tuple(stages)
 
 
 def activation_yaml_with_selection(text, *, count=None, fraction=None):
@@ -119,6 +160,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         target_conversion=DEFAULT_TARGET_CONVERSION, max_reactions_per_cycle=None, seed=31415,
         reaction_cutoff=5., max_reaction_cutoff=10., cutoff_growth_factor=1.2,
         cutoff_zero_cycles=2, fixed_reaction_cutoff=False,
+        relaxation_stages=None, post_reaction_md_steps=0,
         reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
         max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
         save_trajectory=False):
@@ -146,6 +188,11 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     reaction_cutoff: Å。YAMLの距離を上書きし、既定5 Åから始める。
     反応0件がcutoff_zero_cycles回連続すると次cycleからcutoff_growth_factor倍。
     max_reaction_cutoffで頭打ち。固定距離ならfixed_reaction_cutoff=True。
+    遠い対を無理に結合させると歪んだ構造になりやすいので、長いrunでは上限を5〜6 Åに下げる。
+    relaxation_stages: 各cycleの反応後MDの段リスト（cycle_stages参照）。Noneならnvt_*/npt_*の2段。
+    post_reaction_md_steps: 反応直後の最小化に続けて、反応の確定前にnvt_timestep刻みで
+      流すNVT step数（既定0）。commit前に伸びた新結合をならす。ここで非有限エネルギーに
+      なると反応はcommitされず、計算はReactionTransactionErrorで止まる。
     reaction_assignment: local_templatesは局所電荷転写／パラメータ更新、wholeは全体再計算。
     local_radius: 更新対象の結合本数。local_context_radius: 計算用の追加外側buffer。
     template_cache: 計算済みフラグメントbank。省略時results/<project>/reaction_templates。
@@ -200,7 +247,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     _number(density, 'density')
     for name, value, minimum in (('cycles', cycles, 0),
                                  ('minimization_iterations', minimization_iterations, 0),
-                                 ('compression_steps', compression_steps, 0)):
+                                 ('compression_steps', compression_steps, 0),
+                                 ('post_reaction_md_steps', post_reaction_md_steps, 0)):
         if type(value) is not int or value < minimum:
             raise ValueError(f'{name} must be an integer >= {minimum}')
     if target_conversion is not None and not 0 <= target_conversion <= 1:
@@ -235,9 +283,12 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         rules = [replace(rule, max_reactions_per_cycle=max_reactions_per_cycle) for rule in rules]
     rules = [replace(rule, distance_cutoff=reaction_cutoff) for rule in rules]
     pressure_bar = pressure_atm * 1.01325
-    stages = (MDStage('NVT', steps=nvt_steps, timestep=nvt_timestep, temperature=temperature),
-              MDStage('NPT', steps=npt_steps, timestep=npt_timestep, temperature=temperature,
-                      pressure=pressure_bar))
+    if relaxation_stages is not None:
+        stages = cycle_stages(relaxation_stages, temperature=temperature, pressure_atm=pressure_atm)
+    else:
+        stages = (MDStage('NVT', steps=nvt_steps, timestep=nvt_timestep, temperature=temperature),
+                  MDStage('NPT', steps=npt_steps, timestep=npt_timestep, temperature=temperature,
+                          pressure=pressure_bar))
     if compression_steps:
         _number(compression_pressure_mpa, 'compression_pressure_mpa')
         if compression_pressure_mpa <= 0:
@@ -319,6 +370,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     compression_pressure_MPa=compression_pressure_mpa if compression else None,
                     equilibration=asdict(equilibration),
                     cycle_md_stages=[asdict(stage) for stage in stages], cycles=cycles,
+                    relaxation_stages=relaxation_stages, post_reaction_md_steps=post_reaction_md_steps,
                     save_trajectory=save_trajectory,
                     output_interval_cycles=1 if save_trajectory else None,
                     minimization_iterations=minimization_iterations,
@@ -386,7 +438,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         result = runner.run(md_steps_per_cycle=0, max_cycles=cycles,
             max_reactions_per_cycle=max_reactions_per_cycle, minimize_after_reaction=True,
             minimization_max_iterations=minimization_iterations,
-            cycle_md_stages=stages, target_conversion=target_conversion,
+            post_reaction_md_steps=post_reaction_md_steps, cycle_md_stages=stages, target_conversion=target_conversion,
             history_path=output / 'reaction_history.jsonl', on_cycle=save_cycle)
         save_summary(runner)
         save_structure(runner, output / 'final')
@@ -431,11 +483,16 @@ def main():
     parser.add_argument('--target-conversion', type=float, default=DEFAULT_TARGET_CONVERSION,
                         help='目標反応率0〜1（既定0.995 = 99.5%%）')
     parser.add_argument('--max-reactions-per-cycle', type=int, help='1 cycleの最大反応数。指定時はYAMLのルール上限も上書き')
-    parser.add_argument('--reaction-cutoff', type=float, default=5., help='開始時の反応探索距離 Å（YAMLを上書き、既定5）')
+    parser.add_argument('--reaction-cutoff', type=float,
+                        help='開始時の反応探索距離 Å（YAMLを上書き、既定5。上限より大きければ上限）')
     parser.add_argument('--max-reaction-cutoff', type=float, default=10., help='探索距離の上限 Å（既定10）')
     parser.add_argument('--cutoff-growth-factor', type=float, default=1.2, help='0件が続いた際の距離倍率（既定1.2）')
     parser.add_argument('--cutoff-zero-cycles', type=int, default=2, help='距離拡大までの連続0件cycle数（既定2）')
     parser.add_argument('--fixed-reaction-cutoff', action='store_true', help='距離をreaction-cutoffに固定し、自動拡大を無効化')
+    parser.add_argument('--relaxation-stages', type=load_relaxation_stages,
+                        help='各cycleの反応後MD。JSON文字列かJSON/YAMLファイル。指定時は--nvt-*/--npt-*を使わない')
+    parser.add_argument('--post-reaction-md-steps', type=int, default=0,
+                        help='反応確定前、最小化の後に流すNVT step数（--nvt-timestep刻み、既定0）')
     parser.add_argument('--reaction-assignment', choices=('local_templates', 'whole'), default='local_templates',
                         help='反応後の割り当て方式。既定は局所フラグメント電荷の転写')
     parser.add_argument('--local-radius', type=int, default=5, help='更新対象の結合本数（既定5）')
@@ -448,6 +505,8 @@ def main():
     args = vars(parser.parse_args())
     smiles_file = args.pop('smiles_file')
     args['smiles'] = smiles_file.read_text().strip() if smiles_file else args['smiles'] or DEFAULT_SMILES
+    if args['reaction_cutoff'] is None:
+        args['reaction_cutoff'] = min(5., args['max_reaction_cutoff'])
     p.configure_logging(progress_interval=args.pop('log_interval'))
     run(**args)
 

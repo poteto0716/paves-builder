@@ -42,6 +42,23 @@ packing後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoi
 `--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
 `--epoxy-smiles`、`--total-atoms`、`--target-conversion`、`--cycles`、
 `--activation-fraction`または`--activation-count`で変更できます。
+反応距離の上限は`--max-reaction-cutoff`（既定10 Å。おかしな構造が出る長いrunでは5 Å程度）で変えられます。
+開始距離は`--reaction-cutoff`、距離の固定は`--fixed-reaction-cutoff`です。
+反応後の緩和は`--reaction-minimization-iterations`、`--post-reaction-md-steps`、
+`--relaxation-stages`（JSON文字列かJSON/YAMLファイル）で設定します。
+段の書式は[crosslinking/README.md](../crosslinking/README.md#反応距離の上限と反応後の緩和)を参照してください。
+例:
+
+```bash
+python workflows/network_properties/network_properties.py new workflows/network_properties/output/epoxy_all \
+  --replicates 4 --seed 31415 --max-reactions-per-cycle 50 --solvent water=O --platform CUDA \
+  --max-reaction-cutoff 5 --post-reaction-md-steps 1000 --reaction-minimization-iterations 5000 \
+  --relaxation-stages workflows/crosslinking/relaxation.example.yaml
+```
+
+YAMLファイルの中身は`new`の時点で`project.json`に取り込まれます。そのため、後でファイルを書き換えても既存projectには影響しません。
+これらは`project.json`の`crosslinking`（`max_reaction_cutoff`、`minimization_iterations`、
+`post_reaction_md_steps`、`relaxation_stages`）にも記録されます。初回run前なら、そこを直接編集しても構いません。
 独自の反応ルールは`--activation-yaml`、`--reactions-yaml`で渡します。
 これらはproject内の`crosslinking/`へコピーし、SHA-256で変更を検査します。
 `project.json`の`crosslinking`以下には全構築条件を保存します。

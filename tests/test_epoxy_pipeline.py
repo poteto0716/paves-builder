@@ -105,6 +105,46 @@ class EpoxyPipelineTests(unittest.TestCase):
             run(Namespace(project=self.project,replica=None,defer_report=True))
         self.assertEqual(events,[('build',1),('properties',1),('build',2),('properties',2)])
 
+    def test_cutoff_and_relaxation_options_reach_crosslinking(self):
+        from workflows.crosslinking.crosslinking import load_relaxation_stages
+        stages=Path(self.temp.name)/'relax.yaml'
+        stages.write_text('stages:\n'
+            '  - {ensemble: NVT, steps: 5000, timestep: 0.1}\n'
+            '  - {ensemble: NVT, steps: 5000, timestep: 0.5, temperature: 350}\n'
+            '  - {ensemble: NPT, steps: 20000, timestep: 1.0, pressure_atm: 1}\n')
+        full=Path(self.temp.name)/'careful'
+        self.assertEqual(main(['new',str(full),'--platform','CPU','--max-reaction-cutoff','4',
+            '--post-reaction-md-steps','500','--reaction-minimization-iterations','5000',
+            '--relaxation-stages',str(stages)]),0)
+        cfg=json.loads((full/'project.json').read_text())
+        options=cfg['crosslinking']
+        self.assertEqual((options['reaction_cutoff'],options['max_reaction_cutoff']),(4.,4.))
+        self.assertEqual(options['post_reaction_md_steps'],500)
+        self.assertEqual(options['minimization_iterations'],5000)
+        self.assertEqual([s['timestep'] for s in options['relaxation_stages']],[.1,.5,1.])
+        command=build_command(full,cfg,1)
+        self.assertEqual(load_relaxation_stages(command[command.index('--relaxation-stages')+1]),
+                         options['relaxation_stages'])
+        self.assertEqual(command[command.index('--max-reaction-cutoff')+1],'4.0')
+        for bad in ('[{"ensemble":"NVT","steps":10}]',
+                    '[{"ensemble":"NVT","steps":10,"timestep":0.1,"pressure_atm":1}]'):
+            with redirect_stderr(io.StringIO()):
+                self.assertEqual(main(['new',str(Path(self.temp.name)/'bad'),'--relaxation-stages',bad]),1)
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(['new',str(Path(self.temp.name)/'bad'),'--reaction-cutoff','6',
+                                   '--max-reaction-cutoff','5']),1)
+        self.assertFalse((Path(self.temp.name)/'bad').exists())
+
+    def test_project_without_newer_crosslinking_options_still_validates(self):
+        from workflows.network_properties.network_properties import validate
+        cfg=json.loads(json.dumps(self.cfg))
+        for name in ('relaxation_stages','post_reaction_md_steps','compression_steps'):
+            del cfg['crosslinking'][name]
+        validate(cfg)
+        cfg['crosslinking']['unknown_option']=1
+        with self.assertRaises(ValueError):
+            validate(cfg)
+
     def test_saved_network_cannot_silently_ignore_build_options(self):
         output=Path(self.temp.name)/'invalid'
         with redirect_stderr(io.StringIO()) as error:

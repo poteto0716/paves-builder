@@ -1,0 +1,12 @@
+# 各cycleの反応後MD（--relaxation-stagesに渡す例）。上から順に実行する。
+# ensemble: NVT/NPT、steps: step数、timestep: fs
+# 省略可: temperature（K、既定は--temperature）、pressure_atm（NPTのみ、既定は--pressure-atm）
+# 使い方:
+#   python crosslinking.py --project careful --max-reaction-cutoff 5 \
+#     --post-reaction-md-steps 1000 --minimization-iterations 5000 \
+#     --relaxation-stages relaxation.example.yaml
+#   network_properties.py newでも同じ--relaxation-stages（ファイルかJSON文字列）を使える。
+stages:
+  - {ensemble: NVT, steps: 5000, timestep: 0.1}    # 0.5 ps: 新結合を小さい刻みでならす
+  - {ensemble: NVT, steps: 10000, timestep: 0.5}   # 5 ps
+  - {ensemble: NPT, steps: 20000, timestep: 1.0, pressure_atm: 1}  # 20 ps: 密度を戻す

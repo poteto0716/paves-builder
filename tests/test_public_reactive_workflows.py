@@ -142,6 +142,32 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertEqual(sum(a['aromatic'] for a in graph['atoms']), 32)
             self.assertGreaterEqual(json.loads((output / 'metrics.json').read_text())['number_of_reactions'], 1)
 
+    def test_configured_post_reaction_relaxation_runs_each_stage(self):
+        env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
+        env.pop('PYTHONPATH', None)
+        stages = [dict(ensemble='NVT', steps=2, timestep=.1), dict(ensemble='NVT', steps=2, timestep=.5),
+                  dict(ensemble='NPT', steps=2, timestep=1., pressure_atm=1.)]
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for name in ('activation.yaml', 'reactions.yaml'):
+                shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
+            completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
+                '--project', 'relax', '--total-atoms', '500', '--activation-count', '1',
+                '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
+                '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
+                '--minimization-iterations', '100', '--post-reaction-md-steps', '2',
+                '--relaxation-stages', json.dumps(stages)],
+                cwd=project, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+            output = project / 'results/relax'
+            settings = json.loads((output / 'settings.json').read_text())
+            self.assertEqual(settings['relaxation_stages'], stages)
+            self.assertEqual(settings['post_reaction_md_steps'], 2)
+            self.assertEqual([s['timestep'] for s in settings['cycle_md_stages']], [.1, .5, 1.])
+            cycle, = json.loads((output / 'cycles.json').read_text())
+            self.assertGreaterEqual(cycle['reactions'], 1)
+            self.assertEqual(len(cycle['md_stages']), 3)
+
     def test_crosslink_water_pack_and_md_resume(self):
         import numpy as np
         env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')

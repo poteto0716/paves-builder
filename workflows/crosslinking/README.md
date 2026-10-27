@@ -32,6 +32,39 @@ packing直後のvoidを潰すため、初期NPTの前に300 K・200 MPa・50 ps�
 目標に到達すれば早期終了し、未到達でも最大5000サイクルで最終構造を保存して終了します。
 変更する場合は`--target-conversion`と`--cycles`を明示してください。
 
+### 反応距離の上限と反応後の緩和
+
+反応探索距離は5 Åから始まり、反応0件が2 cycle続くと1.2倍に広がり、最大10 Åまで伸びます。
+遠い対を無理に結合させると、伸びた結合や環の貫通などのおかしな構造ができやすくなります。
+長いrunでは`--max-reaction-cutoff 5`のように上限を下げてください。
+開始距離（`--reaction-cutoff`）を省略すると、開始距離は5 Åと上限の小さい方になります。
+`--fixed-reaction-cutoff`を指定すると、距離は拡大しません。
+
+各cycleの反応後の緩和は次の順で行います。
+
+1. 最小化（`--minimization-iterations`、既定2000）
+2. 任意で`--post-reaction-md-steps`のNVT（0.1 fs刻み、反応のcommit前）
+3. `--relaxation-stages`の各段
+
+`--relaxation-stages`はJSON文字列、またはJSON/YAMLファイルで指定します。
+指定すると`--nvt-*`／`--npt-*`の既定2段は使いません。
+各段の書式は`ensemble`（NVT/NPT）、`steps`、`timestep`（fs）で、`temperature`（K）と
+`pressure_atm`（NPTのみ）は省略できます。同じ内容の例を[relaxation.example.yaml](relaxation.example.yaml)に置いています:
+
+```yaml
+stages:
+  - {ensemble: NVT, steps: 5000, timestep: 0.1}    # 0.5 ps: 新結合を小さい刻みでならす
+  - {ensemble: NVT, steps: 10000, timestep: 0.5}   # 5 ps
+  - {ensemble: NPT, steps: 20000, timestep: 1.0, pressure_atm: 1}  # 20 ps: 密度を戻す
+```
+
+```bash
+python crosslinking.py --project careful --max-reaction-cutoff 5 \
+  --post-reaction-md-steps 1000 --minimization-iterations 5000 --relaxation-stages relaxation.example.yaml
+```
+
+実際に使った段は`settings.json`の`cycle_md_stages`に、各cycleの結果は`cycles.json`の`md_stages`に残ります。
+
 反応規則は同じディレクトリの`activation.yaml`と`reactions.yaml`です。
 `--activation-fraction`／`--activation-count`を指定すると、`results/<project>/activation.yaml`の
 `selection`と`fraction`／`count`の行もその値に書き換えて保存します（元のファイルは変更しません）。
