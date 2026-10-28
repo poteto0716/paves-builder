@@ -13,10 +13,10 @@ dependencies:
   - jaxlib=*=cpu*
   - openmm>=8.2,<9
   - cuda-version>=12,<13
-  # The version the 20,000-atom crosslinking run was checked with in this image.
-  # polypaves perceives large networks locally, so newer RDKit ring perception
-  # (much slower on crosslinked networks since 2026.09) no longer stalls it.
-  - rdkit=2026.09
+  # RDKit 2026.09 perceives rings (SSSR) orders of magnitude more slowly on
+  # crosslinked networks. polypaves perceives large networks locally, but
+  # OpenFF still perceives a whole network when network_properties loads it.
+  - rdkit=2025.09
   - numpy
   - scipy
   # Use the headless distribution so conda does not install a second Qt/PySide6.
