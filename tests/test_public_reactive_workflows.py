@@ -176,6 +176,38 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertEqual(json.loads((output / 'final.structure.json').read_text())['graphs'][0]['bonds'],
                              json.loads((output / 'reacted.structure.json').read_text())['graphs'][0]['bonds'])
 
+    def test_unreacted_monomers_are_removed_on_request(self):
+        env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
+        env.pop('PYTHONPATH', None)
+        with tempfile.TemporaryDirectory() as temp:
+            project = Path(temp)
+            for name in ('activation.yaml', 'reactions.yaml'):
+                shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
+            completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
+                '--project', 'trim', '--total-atoms', '500', '--activation-count', '1',
+                '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
+                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
+                '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
+                '--minimization-iterations', '100', '--remove-unreacted-monomers'],
+                cwd=project, env=env, capture_output=True, text=True, timeout=600)
+            self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+            output = project / 'results/trim'
+            full = json.loads((output / 'final_with_unreacted.structure.json').read_text())
+            final = json.loads((output / 'final.structure.json').read_text())
+            metrics = json.loads((output / 'metrics.json').read_text())
+            # One reaction joins two monomers; every other molecule is removed.
+            self.assertEqual(len(final['graphs']), 1)
+            self.assertEqual(metrics['unreacted_monomers_removed'], len(full['graphs']) - 1)
+            self.assertEqual(len(final['positions']), metrics['final_total_atoms'])
+            self.assertEqual(sum(len(g['atoms']) for g in final['graphs']), len(final['positions']))
+            self.assertEqual(final['atoms'], len(final['positions']))
+            kept = {a['stable_atom_id'] for a in final['graphs'][0]['atoms']}
+            index = [i for i, a in enumerate(a for g in full['graphs'] for a in g['atoms']) if a['stable_atom_id'] in kept]
+            self.assertEqual(final['positions'], [full['positions'][i] for i in index])
+            self.assertTrue((output / 'final.mol2').is_file())
+            from polypaves.sorption import load_network
+            self.assertEqual(len(load_network(output / 'final.structure.json').positions_nm), len(final['positions']))
+
     def test_crosslink_water_pack_and_md_resume(self):
         import numpy as np
         env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')

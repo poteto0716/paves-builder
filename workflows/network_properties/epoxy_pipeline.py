@@ -34,6 +34,7 @@ def configure(args):
         activation_count=getattr(args, 'activation_count', None),
         max_reactions_per_cycle=getattr(args, 'max_reactions_per_cycle', None),
         save_trajectory=getattr(args, 'save_trajectory', False),
+        remove_unreacted_monomers=getattr(args, 'remove_unreacted_monomers', False) or None,
         compression_pressure_mpa=getattr(args, 'compression_pressure_mpa', None),
         compression_steps=getattr(args, 'compression_steps', None),
         reaction_cutoff=getattr(args, 'reaction_cutoff', None),
@@ -115,6 +116,8 @@ def validate(cfg):
         raise ValueError('crosslinking.target_conversion must lie between 0 and 1')
     if type(options['save_trajectory']) is not bool:
         raise ValueError('crosslinking.save_trajectory must be a boolean')
+    if type(options['remove_unreacted_monomers']) is not bool:
+        raise ValueError('crosslinking.remove_unreacted_monomers must be a boolean')
     count, fraction = options['activation_count'], options['activation_fraction']
     if count is not None and fraction is not None:
         raise ValueError('use one activation count or fraction')

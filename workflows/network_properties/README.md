@@ -39,6 +39,8 @@ SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別�
 作成済みのproject.jsonにもすべての設定を記録します。
 架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
 トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
+`--remove-unreacted-monomers`で、架橋後に他の分子と結合しなかったモノマーを
+除いた構造を物性評価に使います（既定OFF。抜けた体積は熱履歴の昇温NPTで緩和）。
 packing（既定0.5 g/cm³、`--packing-density`。PAVESの局所緩和あり、環を貫通する結合があれば停止）後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
 `--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
 `--epoxy-smiles`、`--total-atoms`、`--target-conversion`、`--cycles`、

@@ -23,6 +23,7 @@ import math
 from pathlib import Path
 import re
 import shutil
+from types import SimpleNamespace
 import polypaves as p
 from polypaves.structure import write_structure_files
 from polypaves.reaction import (
@@ -39,6 +40,33 @@ DEFAULT_ATOM_COUNT_MODE = 'above'
 DEFAULT_CYCLES = 5000
 DEFAULT_TARGET_CONVERSION = .995
 STAGE_KEYS = {'ensemble', 'steps', 'timestep', 'temperature', 'pressure_atm'}
+
+
+def without_unreacted_monomers(structure, origin):
+    """Copy of structure without molecules that are still one initial monomer.
+
+    origin maps stable_atom_id -> index of the initial (activated) monomer.
+    A monomer that was only activated, and never bonded to another one, also
+    counts as unreacted. Returns (structure, removed molecule indices).
+    """
+    import numpy as np
+    removed, keep = [], []
+    offset = 0
+    for i, graph in enumerate(structure.graphs):
+        sources = {origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}
+        (removed if len(sources) == 1 else keep).append(i)
+    if not keep:
+        raise RuntimeError('every molecule is an unreacted monomer; nothing would remain')
+    trimmed = copy.copy(structure)
+    offsets = np.cumsum([0] + [len(g['atoms']) for g in structure.graphs])
+    atoms = np.concatenate([np.arange(offsets[i], offsets[i + 1]) for i in keep])
+    trimmed.graphs = [structure.graphs[i] for i in keep]
+    trimmed._components = [structure._components[i] for i in keep]
+    trimmed._positions = np.asarray(structure._positions)[atoms].copy()
+    if hasattr(structure, '_original_identity'):
+        trimmed._original_identity = [structure._original_identity[a] for a in atoms]
+    trimmed.report = {**structure.report, 'atoms': trimmed.n_atoms, 'molecules': len(trimmed.graphs)}
+    return trimmed, removed
 
 
 def load_relaxation_stages(value):
@@ -165,7 +193,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         pack_relax=50, pack_postrelax=400,
         template_workers=4, reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
         max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
-        save_trajectory=False):
+        save_trajectory=False, remove_unreacted_monomers=False):
     """packingから反応MD、最終構造の保存まで実行する。
 
     project: 保存先はカレントディレクトリ/results/<project>。
@@ -215,6 +243,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     require_reaction_templates=Trueなら、成長cycle中の未知templateを計算せずエラー。
     target_conversionは0〜1（既定0.995）、Noneならcyclesまで。
     save_trajectory: TrueならOVITO軌跡とcycle別構造も保存する（既定False）。
+    remove_unreacted_monomers: Trueなら最終構造から未反応モノマーを削除する（既定False）。
+      削除前はfinal_with_unreacted.*に残す。抜けた体積はこのスクリプトでは緩和しない。
     最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
     戻り値はReactiveMDResult。
     """
@@ -387,6 +417,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                                         max_reactions=max_reactions_per_cycle)
         field.precompute(runner.engine.graph, selected)
     runner.structure.write_json(output / 'initial.structure.json')
+    # 開始点の付加後、反応前の分子番号。未反応モノマーの判定に使う。
+    origin = {a['stable_atom_id']: i for i, g in enumerate(runner.structure.graphs) for a in g['atoms']}
     settings = dict(project=project, working_directory=str(definitions), output_directory=str(output),
                     smiles=smiles, input_smiles=input_smiles, target_total_atoms=total_atoms,
                     atom_count_mode=atom_count_mode, atoms_per_molecule=atoms_per_molecule,
@@ -405,7 +437,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     final_relaxation_steps=final_relaxation_steps, final_md_steps=final_md_steps,
                     pack_relax=pack_relax, pack_postrelax=pack_postrelax,
                     ring_piercing_bonds_after_packing=piercing,
-                    save_trajectory=save_trajectory,
+                    save_trajectory=save_trajectory, remove_unreacted_monomers=remove_unreacted_monomers,
                     output_interval_cycles=1 if save_trajectory else None,
                     minimization_iterations=minimization_iterations,
                     target_conversion=target_conversion, max_reactions_per_cycle=max_reactions_per_cycle,
@@ -489,10 +521,19 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             runner.equilibrate(final_stages)
             write_frame(runner, phase='final relaxed')
         metrics = save_summary(runner)
-        save_structure(runner, output / 'final')
+        final = runner.structure
+        if remove_unreacted_monomers:
+            # 削除前の構造も残す。抜けた体積は後続のNPT（network_propertiesの熱履歴など）で緩和する。
+            save_structure(runner, output / 'final_with_unreacted')
+            final, removed = without_unreacted_monomers(final, origin)
+            metrics.update(unreacted_monomers_removed=len(removed),
+                           unreacted_atoms_removed=runner.structure.n_atoms - final.n_atoms,
+                           final_total_atoms=final.n_atoms)
+            print(f'Removed {len(removed)} unreacted monomers '
+                  f'({runner.structure.n_atoms - final.n_atoms} atoms); {final.n_atoms} atoms remain', flush=True)
+        save_structure(SimpleNamespace(structure=final), output / 'final')
         # 環を貫通した結合は伸びたまま残り、後続の固定トポロジーMDの結合長検査で停止する。
         from polypaves.ring_piercing import ring_piercing_bonds
-        final = runner.structure
         threaded = ring_piercing_bonds(final.graphs, final._positions, final.box_vectors)
         metrics['ring_piercing_bonds_final'] = len(threaded)
         (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
@@ -573,6 +614,8 @@ def main():
     parser.add_argument('--template-cache', type=Path, help='計算済み電荷／パラメータbank。省略時project内reaction_templates')
     parser.add_argument('--require-reaction-templates', action='store_true', help='成長cycle中の未知templateを計算せずエラーにする')
     parser.add_argument('--seed', type=int, default=31415)
+    parser.add_argument('--remove-unreacted-monomers', action='store_true',
+                        help='最終構造から、他の分子と結合しなかったモノマー（開始点のみのものを含む）を削除する')
     parser.add_argument('--log-interval', type=float, default=10.)
     args = vars(parser.parse_args())
     smiles_file = args.pop('smiles_file')

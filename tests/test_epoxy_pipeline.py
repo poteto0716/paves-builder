@@ -37,6 +37,13 @@ class EpoxyPipelineTests(unittest.TestCase):
         self.assertEqual(options['total_atoms'],20000)
         self.assertEqual(options['atom_count_mode'],'above')
         self.assertEqual(options['cycles'],5000)
+        self.assertFalse(options['remove_unreacted_monomers'])
+        self.assertNotIn('--remove-unreacted-monomers',build_command(full,dict(json.loads((full/'project.json').read_text())),1))
+        trimmed=Path(self.temp.name)/'trimmed'
+        self.assertEqual(main(['new',str(trimmed),'--platform','CPU','--remove-unreacted-monomers']),0)
+        cfg=json.loads((trimmed/'project.json').read_text())
+        self.assertTrue(cfg['crosslinking']['remove_unreacted_monomers'])
+        self.assertIn('--remove-unreacted-monomers',build_command(trimmed,cfg,1))
 
     def fake_popen(self, command, cwd, *, stderr_lines=(), returncode=0, **options):
         if not returncode:
