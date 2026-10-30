@@ -228,9 +228,13 @@ python workflows/network_properties/network_graph.py replica_01/relaxed_300K.str
   --histogram-csv strands.csv --histogram-png strands.png
 ```
 
-網目鎖の長さ（架橋点の間にある重原子数。途中の環系はその全原子を数える）の全分布は
-`strand_heavy_atoms_histogram`（長さ → 本数）に入り、reportでは各レプリカの
-`network_strands.csv`／`network_strands.png`にも出力します。
+網目鎖の長さは2通りで、全分布（長さ → 本数）を出力します。
+- `strand_backbone_bonds_histogram`：架橋点の原子から架橋点の原子までの最短経路の結合数（鎖の輪郭長）。
+  環系は経路が通る原子だけを数えます（フルオレン骨格を通る鎖では9位の炭素1個）。
+- `strand_heavy_atoms_histogram`：架橋点の間にある重原子数。途中の環系は側の原子も含めて全部数える（質量的な大きさ）。
+
+reportでは各レプリカの`network_strands.csv`／`network_strands.png`にも両方を出力します。
+M_c = ρN_A/ν_eは鎖の本数だけで決まり、長さの数え方には依存しません。
 
 H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系を1つの節点にまとめます
 （鎖の途中の芳香環は通過点で、分岐点とは数えません。周期境界を通って閉じる環は環とみなしません）。

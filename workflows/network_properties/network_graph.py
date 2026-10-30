@@ -82,6 +82,29 @@ def _bridges(adjacency):
     return bridges
 
 
+def _backbone_bonds(atom_edges, start, end, interior):
+    """Bonds on the shortest heavy-atom path from a start junction atom to an end junction atom.
+
+    Only interior atoms of the strand are crossed. None when both ends are the same
+    junction (a strand closing through the periodic boundary).
+    """
+    start, end = set(start), set(end)
+    if start & end:
+        return None
+    frontier, seen, distance = list(start), set(start), 0
+    while frontier:
+        distance += 1
+        following = []
+        for a in frontier:
+            for b, _ in atom_edges[a]:
+                if b in end:
+                    return distance
+                if b in interior and b not in seen:
+                    seen.add(b); following.append(b)
+        frontier = following
+    return None
+
+
 def _ring_systems(graph, heavy, shift_of):
     """Union of small rings (3-8) that share atoms, over heavy atoms.
 
@@ -145,8 +168,12 @@ def polar_groups(graphs):
     return dict(counts)
 
 
-def network_structure(graphs, positions_nm, box_nm, temperature_K=300.):
-    """Strand/junction statistics of a periodic network; positions and box in nm."""
+def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=None):
+    """Strand/junction statistics of a periodic network; positions and box in nm.
+
+    details: optional list that receives one dict per strand or loop with the
+    graph index and the atom indices of its two junctions and its interior.
+    """
     xyz = np.asarray(positions_nm, dtype=float)
     box = np.asarray(box_nm, dtype=float)
     if box.shape == (3,):
@@ -157,10 +184,10 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300.):
     total_mass = masses.sum()
 
     sol_mass = dangling_mass = active_mass = 0.
-    junction_degrees, strand_lengths, strand_masses = Counter(), [], []
+    junction_degrees, strand_lengths, strand_masses, backbone_bonds = Counter(), [], [], []
     strands = loops = gel_molecules = 0
     offset = 0
-    for graph in graphs:
+    for gi, graph in enumerate(graphs):
         n = len(graph['atoms'])
         local_xyz, local_mass = xyz[offset:offset + n], masses[offset:offset + n]
         offset += n
@@ -264,16 +291,26 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300.):
                     continue
                 used.add(k)
                 path_mass, path_atoms, shift, previous, node = 0., 0, s.copy(), k, other
+                interior = []
                 while node not in junctions:
                     path_mass += node_mass[node]; path_atoms += node_size[node]
+                    interior.append(node)
                     (nxt, k2, s2), = [e for e in active[node] if e[1] != previous]
                     used.add(k2); shift += s2; previous, node = k2, nxt
-                if node == start and not shift.any():
+                is_loop = node == start and not shift.any()
+                if details is not None:
+                    details.append(dict(graph=gi, loop=is_loop, junctions=(members[start], members[node]),
+                                        interior=[members[x] for x in interior]))
+                if is_loop:
                     loops += 1
                     continue
                 strands += 1
                 strand_lengths.append(path_atoms)
                 strand_masses.append(path_mass)
+                bonds_along = _backbone_bonds(atom_edges, members[start], members[node],
+                                              {a for x in interior for a in members[x]})
+                if bonds_along is not None:
+                    backbone_bonds.append(bonds_along)
         # Junction-free active cycles (a chain wrapping the cell by itself).
         for x in active_nodes - junctions:
             for _, k, _ in active[x]:
@@ -321,6 +358,10 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300.):
         mean_strand_interior_mass_g_mol=float(np.mean(strand_masses)) if strands else None,
         # Every effective strand: interior heavy atoms (ring systems count all their atoms) -> count.
         strand_heavy_atoms_histogram={int(k): v for k, v in sorted(Counter(strand_lengths).items())},
+        # Contour: bonds on the shortest path between the two junction atoms (side atoms of rings excluded).
+        strand_backbone_bonds=dict(mean=float(np.mean(backbone_bonds)), median=float(np.median(backbone_bonds)),
+                                   min=int(min(backbone_bonds)), max=int(max(backbone_bonds))) if backbone_bonds else None,
+        strand_backbone_bonds_histogram={int(k): v for k, v in sorted(Counter(backbone_bonds).items())},
         rubbery_shear_modulus_estimates_MPa=dict(
             temperature_K=temperature_K,
             affine=float(nu_e * KB * NA * temperature_K / 1e6),
@@ -351,25 +392,30 @@ def analyze_file(path, temperature_K=300.):
 
 
 def plot_strand_histogram(result, path, title=''):
-    """Bar chart of the strand length histogram (interior heavy atoms)."""
+    """Strand length histograms: backbone bonds (contour) and interior heavy atoms (size)."""
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
-    histogram = {int(k): v for k, v in result['strand_heavy_atoms_histogram'].items()}
-    fig, ax = plt.subplots(figsize=(6, 3.5))
-    ax.bar(list(histogram), list(histogram.values()), width=.8)
-    ax.set(xlabel='Strand length / interior heavy atoms', ylabel='Strands',
-           title=title or f"{result['effective_strands']} effective strands, Mc {result['Mc_g_mol']:.0f} g/mol")
+    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
+    for ax, key, label in ((axes[0], 'strand_backbone_bonds_histogram', 'Backbone bonds between junctions'),
+                           (axes[1], 'strand_heavy_atoms_histogram', 'Interior heavy atoms (whole ring systems)')):
+        histogram = {int(k): v for k, v in result[key].items()}
+        ax.bar(list(histogram), list(histogram.values()), width=.8)
+        ax.set(xlabel=label, ylabel='Strands')
+    fig.suptitle(title or f"{result['effective_strands']} effective strands, Mc {result['Mc_g_mol']:.0f} g/mol")
     fig.tight_layout()
     fig.savefig(path, dpi=160)
     plt.close(fig)
 
 
 def write_strand_csv(result, path):
+    """Both histograms in one table: length, strands by backbone bonds, strands by interior heavy atoms."""
+    bonds = {int(k): v for k, v in result['strand_backbone_bonds_histogram'].items()}
+    atoms = {int(k): v for k, v in result['strand_heavy_atoms_histogram'].items()}
     with Path(path).open('w') as out:
-        out.write('interior_heavy_atoms,strands\n')
-        for length, count in result['strand_heavy_atoms_histogram'].items():
-            out.write(f'{length},{count}\n')
+        out.write('length,strands_by_backbone_bonds,strands_by_interior_heavy_atoms\n')
+        for length in sorted(set(bonds) | set(atoms)):
+            out.write(f'{length},{bonds.get(length, 0)},{atoms.get(length, 0)}\n')
 
 
 if __name__ == '__main__':
