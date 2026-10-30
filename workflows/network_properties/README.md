@@ -167,8 +167,8 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 | 冷却解析 | 各温度plateauの後半を使用。密度の双曲線フィットからTg、線・体積CTE |
 | 温度復帰 | 100→300 K、20 K刻み、各100 ps |
 | 300 K再緩和 | NPT、1 ns |
-| 乾燥NPT観測 | 300 K、1 atm、5 ns、1 ps間隔 |
-| 乾燥NVT観測 | 冷却・復帰後の固定セルで1 ns再緩和、5 ns観測 |
+| 乾燥NPT観測 | 300 K、1 atm、10 ns、1 ps間隔 |
+| 乾燥NVT観測 | 冷却・復帰後の固定セルで1 ns再緩和、10 ns観測 |
 | 独立seed | 既定では架橋構築から独立した4レプリカ。保存構造入力時は共通トポロジー |
 
 冷却は温度plateauを使う段階冷却です。800 Kにも観測用plateauを置くため、
