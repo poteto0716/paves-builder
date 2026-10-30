@@ -57,14 +57,4 @@ def render(project):
             if result['smoke']:
                 fig.suptitle('SMOKE ONLY — no physical interpretation')
             save(fig,path.parent/'diagnostics.png',f'{base.name}: {result["solvent"]["name"]}')
-        transport = base/'thermal_conductivity/result.json'
-        if transport.exists():
-            result = json.loads(transport.read_text())
-            fig, ax = plt.subplots(figsize=(6,3.5))
-            for axis in result['axes']:
-                y = [np.nan if x is None else x for x in axis['profile_K']]
-                ax.plot((np.arange(len(y))+.5)/len(y),y,'o-',ms=3,label='xyz'[axis['axis']])
-            ax.set(xlabel='Fractional coordinate',ylabel='Temperature / K',title='RNEMD: check gradients and steady state')
-            ax.legend()
-            save(fig,base/'thermal_conductivity/profiles.png',f'{base.name}: thermal gradients')
     return figures

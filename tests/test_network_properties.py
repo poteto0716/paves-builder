@@ -15,7 +15,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.analysis import thermodynamics, analyze_npt, analyze_nvt, aggregate, topology, KB, NA, DA
 from workflows.network_properties.mechanical import isotropic_moduli, stress, context_for, CONVERSION_GPA
-from workflows.network_properties.thermal_transport import conductivity
 from workflows.network_properties.network_properties import DEFAULTS, temperature_grid, validate
 
 
@@ -70,7 +69,7 @@ class ThermodynamicsTests(unittest.TestCase):
         self.assertAlmostEqual(aggregate([{'K':1.},{'K':3.}])['K']['std'], np.sqrt(2))
 
 
-class MechanicalTransportTests(unittest.TestCase):
+class MechanicalTests(unittest.TestCase):
     @unittest.skipUnless(os.environ.get('PAVES_CUDA_TESTS') == '1', 'set PAVES_CUDA_TESTS=1 for CUDA checks')
     def test_cuda_context_allows_virtual_shear_of_rectangular_cell(self):
         import openmm as mm
@@ -133,17 +132,6 @@ class MechanicalTransportTests(unittest.TestCase):
         self.assertAlmostEqual(r['young_Hill_GPa'], 9*k*g/(3*k+g))
         self.assertFalse(isotropic_moduli(-np.eye(6))['stable'])
 
-    def test_rnemd_two_periodic_heat_paths_and_si_units(self):
-        # Hot at bin 0, cold at bin 10; gradients +/- 10 K/nm.
-        n, length, area, duration = 20, 10., 4., 100.
-        z = (np.arange(n)+.5)*length/n
-        profile = 350 - 10*np.minimum(z, length-z)
-        target = .2
-        q_J = target * 1e10 * 2 * area*1e-18 * duration*1e-12
-        r = conductivity(profile, length, area, q_J*NA/1000, duration)
-        self.assertAlmostEqual(r['conductivity_W_m_K'], target)
-        self.assertTrue(r['opposite_gradients'])
-
 
 class ConfigurationTests(unittest.TestCase):
     def test_periodic_winding_distinguishes_network_from_finite_ring(self):
@@ -163,8 +151,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(grid,sorted(set(grid),reverse=True))
 
     def test_rejects_bad_configuration_before_running(self):
-        for patch in ({'replicates':0}, {'timestep_fs':float('nan')}, {'transport_slabs':9},
-                      {'elastic_strain':-.01}, {'production_ps':1}, {'transport_axes':[-1]},
+        for patch in ({'replicates':0}, {'timestep_fs':float('nan')},
+                      {'elastic_strain':-.01}, {'production_ps':1},
                       {'solvents':[{'name':'../escape','smiles':'O'}]}):
             with self.subTest(patch=patch), self.assertRaises(ValueError):
                 validate(dict(DEFAULTS, **patch))
@@ -201,7 +189,7 @@ class InstalledWheelIntegration(unittest.TestCase):
             self.assertEqual(json.loads(original)['graphs'],relaxed['graphs'])
             self.assertEqual(source.read_bytes(), original)
             for name in ('cooling_300K.structure.json','relaxed_100K.structure.json','dry_result.json',
-                         'mechanical/result.json','thermal_conductivity/result.json'):
+                         'mechanical/result.json'):
                 self.assertTrue((base/name).is_file(),name)
             wet = json.loads((base/'solvents/water/result.json').read_text())
             self.assertFalse(wet['infinite_dilution_free_energy']['convergence_verified'])

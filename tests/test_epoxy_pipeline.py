@@ -21,7 +21,7 @@ class EpoxyPipelineTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.project=Path(self.temp.name)/'project'
         self.assertEqual(main(['new',str(self.project),'--replicates','2','--seed','100',
-            '--platform','CPU','--smoke','--skip-mechanical','--skip-thermal-conductivity']),0)
+            '--platform','CPU','--smoke','--skip-mechanical']),0)
         self.cfg=json.loads((self.project/'project.json').read_text())
 
     def test_new_defaults_to_independent_epoxy_builds(self):

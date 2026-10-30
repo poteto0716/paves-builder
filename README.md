@@ -118,8 +118,8 @@ packing, and fixed-loading NVT/NPT simulation with checkpoint resume.
   and relax/sample the wet network.
 - [Crosslinked network properties](workflows/network_properties/README.md):
   independent epoxy construction per replica, 800→100 K relaxation and Tg/CTE,
-  300 K thermodynamics, void fraction, elastic response and
-  thermal transport, followed by arbitrary neutral-solvent insertion free energies
+  300 K thermodynamics, void fraction and elastic response,
+  followed by arbitrary neutral-solvent insertion free energies
   and self diffusion, with sampling diagnostics, per-replica CSV summaries, and
   local GPU job submission with explicit GPU indices and independent seeds.
 

@@ -30,10 +30,8 @@ DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=.5,
     solvent_production_ps=10000., diffusion_min_duration_ps=1000.,
     alchemical_windows=22, alchemical_equilibration_ps=100.,
     alchemical_sampling_ps=500., standard_density_nm3=.602214076,
-    mechanical=True, thermal_conductivity=True, nvt_production_ps=5000.,
+    mechanical=True, nvt_production_ps=5000.,
     elastic_strain=.005, elastic_equilibration_ps=100., elastic_production_ps=500.,
-    transport_slabs=20, transport_axes=[0,1,2], transport_swap_steps=1000,
-    transport_equilibration_ps=500., transport_gradient_ps=1000., transport_production_ps=5000.,
     smoke=False)
 
 
@@ -84,8 +82,7 @@ def validate(cfg):
                 'solvent_nvt_ps', 'solvent_equilibration_ps', 'solvent_production_ps',
                 'diffusion_min_duration_ps', 'alchemical_equilibration_ps',
                 'alchemical_sampling_ps', 'standard_density_nm3', 'volume_fraction',
-                'nvt_production_ps', 'elastic_equilibration_ps', 'elastic_production_ps',
-                'transport_equilibration_ps', 'transport_gradient_ps', 'transport_production_ps'):
+                'nvt_production_ps', 'elastic_equilibration_ps', 'elastic_production_ps'):
         if isinstance(cfg[key], bool) or not math.isfinite(cfg[key]) or cfg[key] <= 0:
             raise ValueError(f'{key} must be finite and positive')
     if not cfg['low_K'] < 300 < cfg['high_K']:
@@ -98,12 +95,6 @@ def validate(cfg):
         raise ValueError('sample interval is shorter than a time step')
     if not 0 < cfg['elastic_strain'] < .03:
         raise ValueError('elastic_strain must be > 0 and < 0.03')
-    if type(cfg['transport_slabs']) is not int or cfg['transport_slabs'] < 12 or cfg['transport_slabs'] % 2:
-        raise ValueError('transport_slabs must be even and >= 12')
-    if type(cfg['transport_swap_steps']) is not int or cfg['transport_swap_steps'] < 1:
-        raise ValueError('transport_swap_steps must be a positive integer')
-    if not cfg['transport_axes'] or any(type(a) is not int or a not in (0,1,2) for a in cfg['transport_axes']):
-        raise ValueError('transport_axes must contain 0, 1 and/or 2')
     names = set()
     for solvent in cfg['solvents']:
         name, smiles = solvent['name'], solvent['smiles']
@@ -130,8 +121,7 @@ def new(args):
     cfg.update(platform=args.platform,
                replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']),
                seed=args.seed,
-               solvent_molecules=args.solvent_molecules, mechanical=not args.skip_mechanical,
-               thermal_conductivity=not args.skip_thermal_conductivity)
+               solvent_molecules=args.solvent_molecules, mechanical=not args.skip_mechanical)
     for entry in args.solvent:
         name, sep, smiles = entry.partition('=')
         if not sep:
@@ -454,16 +444,14 @@ def _report(project):
             optical='Refractive index/Abbe number require electronic polarizabilities; not inferred from fixed charges.',
             dielectric='Fixed-charge NVT dielectric tensor from continuous atomic charge displacements; no electronic polarization.',
             cohesive_energy='A percolating network has no unique isolated-molecule reference; not reported.'))
-    for name in ('mechanical', 'thermal_conductivity'):
-        result['scope'][name] = 'Requested; see replica outputs.' if cfg[name] else 'Disabled in project.json.'
-        paths = sorted(project.glob(f'replica_*/{name}/result.json'))
-        if paths:
-            values = [json.loads(p.read_text()) for p in paths]
-            result[name] = dict(completed_replicas=len(values),
-                replica_statistics=aggregate([v.get('isotropic', {}) if name == 'mechanical' else
-                    {k:v[k] for k in ('conductivity_direction_mean_W_m_K', 'thermal_diffusivity_m2_s')} for v in values]),
-                sampling_checks_passed=bool(len(values) == cfg['replicates'] and not cfg['smoke']
-                    and all(v.get('sampling_checks_passed', False) for v in values)))
+    result['scope']['mechanical'] = 'Requested; see replica outputs.' if cfg['mechanical'] else 'Disabled in project.json.'
+    paths = sorted(project.glob('replica_*/mechanical/result.json'))
+    if paths:
+        values = [json.loads(p.read_text()) for p in paths]
+        result['mechanical'] = dict(completed_replicas=len(values),
+            replica_statistics=aggregate([v.get('isotropic', {}) for v in values]),
+            sampling_checks_passed=bool(len(values) == cfg['replicates'] and not cfg['smoke']
+                and all(v.get('sampling_checks_passed', False) for v in values)))
     result['solvents'] = {}
     for spec in cfg['solvents']:
         paths = sorted(project.glob(f'replica_*/solvents/{spec["name"]}/result.json'))
@@ -557,10 +545,6 @@ def run(args):
                 from workflows.network_properties.mechanical import run_mechanical
                 set_stage(base, 'mechanical: elastic constants')
                 run_mechanical(base, cfg, cfg['seed'] + replica)
-            if cfg['thermal_conductivity']:
-                from workflows.network_properties.thermal_transport import run_transport
-                set_stage(base, 'thermal conductivity: RNEMD')
-                run_transport(base, cfg, cfg['seed'] + replica)
             for spec in cfg['solvents']:
                 solvent_properties(project, cfg, replica, spec)
         if not getattr(args, 'defer_report', False):
@@ -620,7 +604,6 @@ def main(argv=None):
     create.add_argument('--solvent', action='append', default=[], metavar='NAME=SMILES')
     create.add_argument('--solvent-molecules', type=int, default=10)
     create.add_argument('--skip-mechanical', action='store_true')
-    create.add_argument('--skip-thermal-conductivity', action='store_true')
     create.add_argument('--smoke', action='store_true')
     create.set_defaults(action=new)
     for name, action in [('run',run), ('report',lambda a: report(a.project))]:

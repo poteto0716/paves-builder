@@ -141,21 +141,6 @@ def collect(project, cfg):
                         f'C({axis},{other})', 'GPa', _at(mechanical, 'symmetric_stiffness_GPa', i, j),
                         checked, display=False)
 
-        if cfg.get('thermal_conductivity', True):
-            source = base / 'thermal_conductivity/result.json'
-            transport = _read(source)
-            for key, label, unit in (
-                    ('conductivity_direction_mean_W_m_K', 'Thermal conductivity (direction mean)', 'W/(m K)'),
-                    ('thermal_diffusivity_m2_s', 'Thermal diffusivity', 'm^2/s')):
-                add(replica, source, transport, 'Thermal transport', f'transport.{key}', label, unit,
-                    _at(transport, key), _at(transport, 'sampling_checks_passed'))
-            axes = {a['axis']: a for a in (transport or {}).get('axes', [])}
-            for i in cfg.get('transport_axes', [0, 1, 2]):
-                add(replica, source, transport, 'Thermal transport', f'transport.conductivity_{"xyz"[i]}_W_m_K',
-                    f'Thermal conductivity ({"xyz"[i]})', 'W/(m K)',
-                    _at(axes.get(i), 'conductivity_W_m_K'),
-                    _at(axes.get(i), 'sampling_checks_passed'), display=False)
-
         for solvent in cfg.get('solvents', []):
             name = solvent['name']
             source = base / 'solvents' / name / 'result.json'

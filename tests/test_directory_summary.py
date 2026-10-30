@@ -22,7 +22,7 @@ class DirectorySummaryTests(unittest.TestCase):
     def project(self,name,value,smoke=False):
         path=self.root/name
         path.mkdir(parents=True)
-        cfg=dict(DEFAULTS,replicates=2,seed=100,mechanical=False,thermal_conductivity=False,
+        cfg=dict(DEFAULTS,replicates=2,seed=100,mechanical=False,
                  solvents=[],network='input.structure.json',input_sha256='saved-input',smoke=smoke)
         (path/'project.json').write_text(json.dumps(cfg))
         for i,offset in ((1,-1),(2,1)):

@@ -19,8 +19,8 @@ class ReplicaSummaryTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.project = Path(self.temp.name)
-        self.cfg = dict(replicates=3, smoke=False, mechanical=True, thermal_conductivity=True,
-                        transport_axes=[0,1,2], solvents=[dict(name='water', smiles='O')])
+        self.cfg = dict(replicates=3, smoke=False, mechanical=True,
+                        solvents=[dict(name='water', smiles='O')])
 
     def put(self, path, data):
         path = self.project / path
@@ -60,18 +60,13 @@ class ReplicaSummaryTests(unittest.TestCase):
         self.put('replica_03/mechanical/result.json',dict(
             isotropic=dict(stable=True, young_Hill_GPa=8.),
             symmetric_stiffness_GPa=tensor, sampling_checks_passed=False))
-        self.put('replica_02/thermal_conductivity/result.json',dict(
-            conductivity_direction_mean_W_m_K=.2,thermal_diffusivity_m2_s=1e-7,
-            sampling_checks_passed=False,
-            axes=[dict(axis=1,conductivity_W_m_K=.3,sampling_checks_passed=False)]))
         _, values = collect(self.project,self.cfg)
         young = values['mechanical.young_Hill_GPa']
         self.assertEqual(young['replicas']['replica_03']['value'],8.)
         self.assertIsNone(young['replicas']['replica_01']['value'])
         self.assertIsNone(young['std'])
         self.assertEqual(values['mechanical.C_xx_yy_GPa']['mean'],1.)
-        self.assertEqual(values['transport.conductivity_y_W_m_K']['mean'],.3)
-        self.assertIsNone(values['transport.conductivity_x_W_m_K']['mean'])
+        self.assertFalse(any(key.startswith('transport.') for key in values))
 
     def test_partial_solvent_results_and_undefined_diffusion_are_preserved(self):
         self.put('replica_01/solvents/water/infinite_dilution_free_energy/result.json',dict(

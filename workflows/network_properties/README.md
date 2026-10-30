@@ -34,7 +34,8 @@ Sageが割り当て可能な単一の中性分子が対象で、イオン、ラ�
 溶媒数は各溶媒で共通の既定値を使います。異なる濃度の比較は別projectで作成します。
 SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別の条件の物性です。
 
-`--skip-mechanical` / `--skip-thermal-conductivity`で追加MDの多い評価を無効にできます。
+`--skip-mechanical`で追加MDの多い弾性評価を無効にできます。
+熱伝導率（RNEMD）は架橋ネットワークでMDが発散したため、このワークフローから外しました。
 作成済みのproject.jsonにもすべての設定を記録します。
 架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
 トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
@@ -116,7 +117,7 @@ GPUが1台なら`--gpus 0`で全レプリカを順番に実行します。
 GPU・seed・ジョブ状態は`jobs/plan.json`と`jobs/status.json`に記録します。
 各レプリカにも`execution.json`を保存します。
 
-`status`は各レプリカの現在の計算段階（架橋構築、熱履歴の各温度、NVT、弾性、熱輸送、
+`status`は各レプリカの現在の計算段階（架橋構築、熱履歴の各温度、NVT、弾性、
 溶媒ごとのpack・挿入自由エネルギー・拡散MD）と経過時間、架橋中なら最新のcycleと反応率、
 ジョブログの最終行を表示します。段階は`replica_XX/progress.json`に記録し、直近の履歴も残します。
 ランチャーやワーカーのPIDが存在しない、または終了済みで回収されていない（zombie）場合は
@@ -172,7 +173,7 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 既定タイムステップは0.5 fs。体積制御はwheelのconstraint group座標に対する
 周期架橋対応Monte Carlo更新です。一般的な分子単位barostatへの置き換えはしません。
 
-**100 Kまで冷却した後に300 Kへ戻した構造**を、弾性・熱伝導・溶媒評価に使います。
+**100 Kまで冷却した後に300 Kへ戻した構造**を、弾性・溶媒評価に使います。
 冷却途中の300 K構造も別名で保存します。再加熱でTgを再評価する設定ではありません。
 800 Kで化学的に分解する場合でも、固定トポロジーMDには分解機構は含まれません。
 
@@ -212,7 +213,7 @@ Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、
 電子分極は含まれず、ガラスの配向緩和が観測時間より長ければ収束しません。
 そのため、誘電物性を自動的に「収束済み」とは判定しません。
 
-## 弾性と熱輸送
+## 弾性
 
 弾性は300 K構造から6成分×正負0.5%のひずみへ分岐します。
 各分岐で100 ps NVT緩和、500 ps観測を行い、全ポテンシャルの微小セル変形差分
@@ -225,18 +226,7 @@ Voigt/Reuss/Hillのbulk/shear modulus、HillのYoung率・Poisson比です。
 仮想ひずみに拘束のvirialを欠落させないため、弾性計算では結合拘束を外し、
 自然質量・0.25 fsを使います。NPTの拘束付きKTとの違いにはこのモデル差も含みます。
 
-熱伝導率はMüller–Plathe逆非平衡MDです。直方体セルを20 slabに分割し、
-離れた2 slabで同質量原子の速度を交換して運動エネルギーを移送します。
-0.25 fsの拘束なしNVE、500 psのNVT準備、1 nsの勾配形成、5 ns観測を
-x/y/zでそれぞれ実行します。full-step velocity Verletを使い、交換時の
-運動量・運動エネルギーを保持します。勾配形成・観測中はthermostatを使いません。
-
-周期セルの2つの熱流路に対して`J = Q/(2 A t)`を用い、reservoir近傍を除いた
-両側の温度勾配からλを求めます。温度分布、勾配のR²、エネルギーdrift、
-交換回数を出力します。両側の勾配が逆向きでなければλはnullです。
-熱拡散率はλ/(ρCp)で、Cpの拘束モデルとの差にも注意が必要です。
-
-弾性・熱輸送は、ひずみ幅、応力の標本誤差、熱流量、定常性、セル長依存の
+弾性は、ひずみ幅、応力の標本誤差、セル長依存の
 比較が必要なため、自動収束フラグを常にfalseにしています。
 値は比較検証用の推定値として保存します。
 
@@ -291,7 +281,6 @@ replica_01/
   00_... / ... / 06_production_300K/  # samples, state, structure, done marker
   07_nvt_300K/                      # direct Cv and fixed-charge dielectric response
   mechanical/result.json
-  thermal_conductivity/result.json
   solvents/water/
     packed/
     infinite_dilution_free_energy/  # windows, overlap, checkpoints, result
@@ -300,14 +289,14 @@ replica_01/
 ```
 
 同じ`run`コマンドで再開します。熱履歴は完了済みの温度・段階のstateから戻し、
-中断した段階を初めから実行します。弾性は完了した正負分岐、熱輸送は完了した方向を
+中断した段階を初めから実行します。弾性は完了した正負分岐を
 再利用します。溶媒MD・自由エネルギーはwheelのcheckpointから再開します。
 熱履歴の再開はOpenMMの乱数状態まで一致する厳密再現ではありません。
 `--network`で共通構造を入力した場合は、異なる架橋トポロジーによるばらつきを含みません。
 
 `report.md`では各物性をreplicaごとに横並びにし、平均・標本SD・SEM、値が得られた本数、
 既存の収束・フィットチェックを通過した本数も表示します。
-乾燥熱物性、Tg/CTE、弾性、熱輸送、溶媒ごとの挿入自由エネルギー・拡散係数を
+乾燥熱物性、Tg/CTE、弾性、溶媒ごとの挿入自由エネルギー・拡散係数を
 同じ形式で集約します。誘電テンソル・弾性テンソルの各成分もCSVに含めます。
 
 `replica_properties.csv`のstatus列は`checks_passed`、`unchecked`、`smoke`、
@@ -350,7 +339,6 @@ reportにも明記し、収束済みにはしません。
 
 - [RadonPy公式：対象物性と評価手順](https://github.com/RadonPy/RadonPy)
 - [Hayashi et al., RadonPy, npj Comput. Mater. 8, 222 (2022)](https://doi.org/10.1038/s41524-022-00906-4)
-- [Müller–Plathe, A simple nonequilibrium molecular dynamics method for calculating the thermal conductivity, J. Chem. Phys. 106, 6082 (1997)](https://doi.org/10.1063/1.473271)
 
 RadonPyを依存として実行するのではなく、物性範囲と揺らぎ式を参照し、
 PAVESが保存したSageネットワーク上で評価します。

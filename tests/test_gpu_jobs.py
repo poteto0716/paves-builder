@@ -25,7 +25,7 @@ class GPUJobTests(unittest.TestCase):
         self.project = Path(self.temp.name)
         (self.project/'input.structure.json').write_text('{}')
         self.cfg = dict(DEFAULTS, platform='CUDA', replicates=3, seed=100,
-            mechanical=False, thermal_conductivity=False, solvents=[], network='input.structure.json',
+            mechanical=False, solvents=[], network='input.structure.json',
             input_sha256=digest(self.project/'input.structure.json'))
         (self.project/'project.json').write_text(json.dumps(self.cfg))
         self.devices = [dict(index='0',uuid='GPU-zero'),dict(index='2',uuid='GPU-two')]

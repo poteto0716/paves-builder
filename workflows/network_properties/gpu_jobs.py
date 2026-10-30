@@ -59,8 +59,6 @@ def replica_complete(project, cfg, replica):
                      base / 'crosslinking/results/epoxy/final.structure.json']
     if cfg['mechanical']:
         required.append(base / 'mechanical/result.json')
-    if cfg['thermal_conductivity']:
-        required.append(base / 'thermal_conductivity/result.json')
     required += [base / 'solvents' / s['name'] / 'result.json' for s in cfg['solvents']]
     return all(path.is_file() for path in required)
 
