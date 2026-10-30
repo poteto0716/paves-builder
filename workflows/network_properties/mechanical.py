@@ -1,7 +1,8 @@
 """Finite-temperature NVT stress/strain response of the relaxed network.
 
-Constraints are removed for virtual affine strains to include every bonded
-virial consistently. Full potential energy differences include PME.
+The network is loaded without X-H constraints, with those bonds as harmonic
+terms, so virtual affine strains include every bonded virial consistently.
+Full potential energy differences include PME.
 """
 from __future__ import annotations
 
@@ -25,8 +26,11 @@ def context_for(host, cfg, seed, timestep_fs=.25, nve=False, allow_shear=False):
     import openmm as mm
     from openmm import unit
     system = mm.XmlSerializer.deserialize(mm.XmlSerializer.serialize(host.system))
-    for index in reversed(range(system.getNumConstraints())):
-        system.removeConstraint(index)
+    if system.getNumConstraints():
+        # OpenFF writes no bond term for a constrained bond; dropping the
+        # constraint would leave that hydrogen unbonded (about -0.7 GPa of
+        # spurious stress in a 20k-atom epoxy). Load with constrained=False.
+        raise ValueError('elastic MD needs a network loaded with load_network(..., constrained=False)')
     if allow_shear:
         # CUDA chooses rectangular/triclinic kernels when the Context is created.
         # Initialize general-cell support, then restore the actual box below.
@@ -106,7 +110,7 @@ def run_mechanical(base, cfg, seed):
     directory.mkdir(exist_ok=True)
     if (directory / 'result.json').exists():
         return
-    host = load_network(Path(base) / 'relaxed_300K.structure.json')
+    host = load_network(Path(base) / 'relaxed_300K.structure.json', constrained=False)
     strain = cfg.get('elastic_strain', .01)
     if not 0 < strain < .03:
         raise ValueError('elastic_strain must lie between 0 and 0.03')
