@@ -488,8 +488,17 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         if final_stages:
             runner.equilibrate(final_stages)
             write_frame(runner, phase='final relaxed')
-        save_summary(runner)
+        metrics = save_summary(runner)
         save_structure(runner, output / 'final')
+        # 環を貫通した結合は伸びたまま残り、後続の固定トポロジーMDの結合長検査で停止する。
+        from polypaves.ring_piercing import ring_piercing_bonds
+        final = runner.structure
+        threaded = ring_piercing_bonds(final.graphs, final._positions, final.box_vectors)
+        metrics['ring_piercing_bonds_final'] = len(threaded)
+        (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
+        if threaded:
+            raise RuntimeError(f'{len(threaded)} bonds pierce rings in the final structure '
+                               f'(atom indices {threaded[:5]}); it cannot be used for later MD')
     if isinstance(field, LocalSageForceField):
         field.close()
     return result

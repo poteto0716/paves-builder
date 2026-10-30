@@ -28,6 +28,13 @@ packingではPAVESのnative局所緩和（`--pack-relax 50`、`--pack-postrelax 
 （20000原子で約700本）、その後の最小化・MDでもほどけず、伸びた結合として最終構造まで残っていました。
 緩和ありでは貫通・伸びた結合とも0本です（packingは数秒から約6分になります）。
 packing後に環（3〜8員環）を貫通する結合が1本でもあれば停止します。
+反応でも、新しい結合の線分が環（3〜8員環）を貫く組は反応させません。
+反応後の最小化で断片が引きずられて環を通り抜けた場合（開環したエポキシに残るC-O結合など）は、
+その反応をcycleから外してやり直します。外した数は`cycles.json`/`metrics.json`の
+`ring_threading_withdrawn_reactions`、線分で除外した候補数は`ring_threading_rejected_candidates`です。
+最終構造に環を貫通した結合が残っていれば、`final.*`を保存した後にエラーで停止します
+（`metrics.json`の`ring_piercing_bonds_final`）。
+以前は20000原子・開始点20%で1本残り、network_propertiesの最初のMDで結合長の検査に失敗していました。
 packingの密度は既定0.5 g/cm³（`--density`）です。0.8で詰めると、嵩高い芳香族エポキシでは原子の重なりが最小化で取り切れず、
 次の加圧NPTが4回中2回NaNで停止しました（0.5では0/4。加圧後は約1.1 g/cm³）。
 packing直後のvoidを潰すため、初期NPTの前に300 K・200 MPa・50 ps（1 fs×50000 step）の
