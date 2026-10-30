@@ -34,7 +34,7 @@ def configure(args):
         activation_count=getattr(args, 'activation_count', None),
         max_reactions_per_cycle=getattr(args, 'max_reactions_per_cycle', None),
         save_trajectory=getattr(args, 'save_trajectory', False),
-        remove_unreacted_monomers=getattr(args, 'remove_unreacted_monomers', False) or None,
+        remove_sol_fraction=getattr(args, 'remove_sol_fraction', False) or None,
         compression_pressure_mpa=getattr(args, 'compression_pressure_mpa', None),
         compression_steps=getattr(args, 'compression_steps', None),
         reaction_cutoff=getattr(args, 'reaction_cutoff', None),
@@ -116,8 +116,8 @@ def validate(cfg):
         raise ValueError('crosslinking.target_conversion must lie between 0 and 1')
     if type(options['save_trajectory']) is not bool:
         raise ValueError('crosslinking.save_trajectory must be a boolean')
-    if type(options['remove_unreacted_monomers']) is not bool:
-        raise ValueError('crosslinking.remove_unreacted_monomers must be a boolean')
+    if type(options['remove_sol_fraction']) is not bool:
+        raise ValueError('crosslinking.remove_sol_fraction must be a boolean')
     count, fraction = options['activation_count'], options['activation_fraction']
     if count is not None and fraction is not None:
         raise ValueError('use one activation count or fraction')
@@ -196,11 +196,13 @@ def ensure_network(project, cfg, replica, lock=None):
         raise RuntimeError('crosslinking did not produce a saved network')
     target = cfg['crosslinking']['target_conversion']
     record = dict(seed=cfg['seed'] + replica, network_sha256=digest(source),
-        network=str(source.relative_to(project)), atoms=settings['actual_total_atoms'],
+        network=str(source.relative_to(project)), atoms=len(data['positions']),
         conversion=metrics['conversion'], target_conversion=target,
         target_reached=target is None or metrics['conversion'] >= target,
         cycles_completed=metrics['cycles_completed'],
-        epoxide_consumption_including_activation=metrics['epoxide_consumption_including_activation'])
+        epoxide_consumption_including_activation=metrics['epoxide_consumption_including_activation'],
+        **{key: metrics[key] for key in ('sol_mass_fraction', 'sol_monomers_removed', 'sol_oligomers_removed',
+                                         'sol_atoms_removed') if key in metrics})
     write_json(base / 'network_origin.json', record)
     write_json(marker, record)
     return source

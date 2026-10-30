@@ -596,8 +596,9 @@ def main(argv=None):
     create.add_argument('--template-workers', type=int,
                         help='processes computing new reaction templates in parallel (default 4; 1 serial)')
     create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
-    create.add_argument('--remove-unreacted-monomers', action='store_true',
-                        help='drop monomers that never bonded to another molecule from the crosslinked network (default OFF)')
+    create.add_argument('--remove-sol-fraction', action='store_true',
+                        help='like development: keep only the network that percolates through the cell, '
+                             'dropping unreacted monomers and unattached oligomers (default OFF)')
     create.add_argument('--activation-yaml', type=Path)
     create.add_argument('--reactions-yaml', type=Path)
     create.add_argument('--platform', choices=('CUDA','CPU','Reference'), default='CUDA')

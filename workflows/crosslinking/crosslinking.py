@@ -42,31 +42,77 @@ DEFAULT_TARGET_CONVERSION = .995
 STAGE_KEYS = {'ensemble', 'steps', 'timestep', 'temperature', 'pressure_atm'}
 
 
-def without_unreacted_monomers(structure, origin):
-    """Copy of structure without molecules that are still one initial monomer.
+def periodic_winding(graph, xyz, cell):
+    """Axes along which one molecule wraps onto its own periodic image.
 
-    origin maps stable_atom_id -> index of the initial (activated) monomer.
-    A monomer that was only activated, and never bonded to another one, also
-    counts as unreacted. Returns (structure, removed molecule indices).
+    Walks the bonds with minimum-image displacements; reaching an atom again at
+    a different cell offset means the molecule is infinite along that axis.
+    xyz and cell are in angstrom; cell rows are the box vectors.
     """
     import numpy as np
-    removed, keep = [], []
-    offset = 0
-    for i, graph in enumerate(structure.graphs):
-        sources = {origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}
-        (removed if len(sources) == 1 else keep).append(i)
-    if not keep:
-        raise RuntimeError('every molecule is an unreacted monomer; nothing would remain')
-    trimmed = copy.copy(structure)
+    inverse = np.linalg.inv(cell)
+    neighbors = [[] for _ in graph['atoms']]
+    for i, j, _ in graph['bonds']:
+        shift = -np.rint((xyz[j] - xyz[i]) @ inverse).astype(int)
+        neighbors[i].append((j, shift))
+        neighbors[j].append((i, -shift))
+    lifts, winding = {}, np.zeros(3, dtype=bool)
+    for root in range(len(neighbors)):
+        if root in lifts:
+            continue
+        lifts[root], pending = np.zeros(3, dtype=int), [root]
+        while pending:
+            i = pending.pop()
+            for j, shift in neighbors[i]:
+                expected = lifts[i] + shift
+                if j not in lifts:
+                    lifts[j] = expected
+                    pending.append(j)
+                else:
+                    winding |= expected != lifts[j]
+    return winding.tolist()
+
+
+def without_sol(structure, origin):
+    """Copy of structure keeping only molecules that percolate through the cell.
+
+    Development dissolves every finite molecule: unreacted monomers and
+    oligomers not attached to the infinite network (the sol fraction). A
+    molecule is kept when it wraps onto its own periodic image along at least
+    one axis. origin maps stable_atom_id -> index of the initial (activated)
+    monomer, to report removed monomers and oligomers separately.
+    Returns (structure or None when nothing percolates, summary dict).
+    """
+    import numpy as np
+    xyz, cell = np.asarray(structure._positions), np.asarray(structure.box_vectors)
     offsets = np.cumsum([0] + [len(g['atoms']) for g in structure.graphs])
+    masses = [sum(a['mass'] for a in g['atoms']) for g in structure.graphs]
+    keep, axes, monomers, oligomers = [], [], 0, 0
+    for i, graph in enumerate(structure.graphs):
+        winding = periodic_winding(graph, xyz[offsets[i]:offsets[i + 1]], cell)
+        if any(winding):
+            keep.append(i)
+            axes.append(winding)
+        elif len({origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}) == 1:
+            monomers += 1
+        else:
+            oligomers += 1
+    kept_atoms = int(sum(offsets[i + 1] - offsets[i] for i in keep))
+    summary = dict(sol_monomers_removed=monomers, sol_oligomers_removed=oligomers,
+                   sol_atoms_removed=structure.n_atoms - kept_atoms,
+                   sol_mass_fraction=1 - sum(masses[i] for i in keep) / sum(masses),
+                   network_molecules_kept=len(keep), network_winding_axes=axes, final_total_atoms=kept_atoms)
+    if not keep:
+        return None, summary
+    trimmed = copy.copy(structure)
     atoms = np.concatenate([np.arange(offsets[i], offsets[i + 1]) for i in keep])
     trimmed.graphs = [structure.graphs[i] for i in keep]
     trimmed._components = [structure._components[i] for i in keep]
-    trimmed._positions = np.asarray(structure._positions)[atoms].copy()
+    trimmed._positions = xyz[atoms].copy()
     if hasattr(structure, '_original_identity'):
         trimmed._original_identity = [structure._original_identity[a] for a in atoms]
     trimmed.report = {**structure.report, 'atoms': trimmed.n_atoms, 'molecules': len(trimmed.graphs)}
-    return trimmed, removed
+    return trimmed, summary
 
 
 def load_relaxation_stages(value):
@@ -193,7 +239,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         pack_relax=50, pack_postrelax=400,
         template_workers=4, reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
         max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
-        save_trajectory=False, remove_unreacted_monomers=False):
+        save_trajectory=False, remove_sol_fraction=False):
     """packingから反応MD、最終構造の保存まで実行する。
 
     project: 保存先はカレントディレクトリ/results/<project>。
@@ -243,8 +289,9 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     require_reaction_templates=Trueなら、成長cycle中の未知templateを計算せずエラー。
     target_conversionは0〜1（既定0.995）、Noneならcyclesまで。
     save_trajectory: TrueならOVITO軌跡とcycle別構造も保存する（既定False）。
-    remove_unreacted_monomers: Trueなら最終構造から未反応モノマーを削除する（既定False）。
-      削除前はfinal_with_unreacted.*に残す。抜けた体積はこのスクリプトでは緩和しない。
+    remove_sol_fraction: Trueなら現像を模して、周期境界をまたいで無限につながった網目だけを
+      最終構造に残し、未反応モノマーとオリゴマー（ゾル分）を削除する（既定False）。
+      削除前はfinal_with_sol.*に残す。抜けた体積はこのスクリプトでは緩和しない。
     最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
     戻り値はReactiveMDResult。
     """
@@ -417,7 +464,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                                         max_reactions=max_reactions_per_cycle)
         field.precompute(runner.engine.graph, selected)
     runner.structure.write_json(output / 'initial.structure.json')
-    # 開始点の付加後、反応前の分子番号。未反応モノマーの判定に使う。
+    # 開始点の付加後、反応前の分子番号。削除したゾル分のモノマー／オリゴマーの区別に使う。
     origin = {a['stable_atom_id']: i for i, g in enumerate(runner.structure.graphs) for a in g['atoms']}
     settings = dict(project=project, working_directory=str(definitions), output_directory=str(output),
                     smiles=smiles, input_smiles=input_smiles, target_total_atoms=total_atoms,
@@ -437,7 +484,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     final_relaxation_steps=final_relaxation_steps, final_md_steps=final_md_steps,
                     pack_relax=pack_relax, pack_postrelax=pack_postrelax,
                     ring_piercing_bonds_after_packing=piercing,
-                    save_trajectory=save_trajectory, remove_unreacted_monomers=remove_unreacted_monomers,
+                    save_trajectory=save_trajectory, remove_sol_fraction=remove_sol_fraction,
                     output_interval_cycles=1 if save_trajectory else None,
                     minimization_iterations=minimization_iterations,
                     target_conversion=target_conversion, max_reactions_per_cycle=max_reactions_per_cycle,
@@ -522,15 +569,18 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             write_frame(runner, phase='final relaxed')
         metrics = save_summary(runner)
         final = runner.structure
-        if remove_unreacted_monomers:
+        if remove_sol_fraction:
             # 削除前の構造も残す。抜けた体積は後続のNPT（network_propertiesの熱履歴など）で緩和する。
-            save_structure(runner, output / 'final_with_unreacted')
-            final, removed = without_unreacted_monomers(final, origin)
-            metrics.update(unreacted_monomers_removed=len(removed),
-                           unreacted_atoms_removed=runner.structure.n_atoms - final.n_atoms,
-                           final_total_atoms=final.n_atoms)
-            print(f'Removed {len(removed)} unreacted monomers '
-                  f'({runner.structure.n_atoms - final.n_atoms} atoms); {final.n_atoms} atoms remain', flush=True)
+            save_structure(runner, output / 'final_with_sol')
+            final, sol = without_sol(final, origin)
+            metrics.update(sol)
+            (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
+            if final is None:
+                raise RuntimeError('No molecule percolates through the cell (below the gel point): '
+                                   'the whole film would dissolve. See final_with_sol.structure.json')
+            print(f"Removed the sol fraction: {sol['sol_monomers_removed']} monomers and "
+                  f"{sol['sol_oligomers_removed']} oligomers ({sol['sol_atoms_removed']} atoms, "
+                  f"{100 * sol['sol_mass_fraction']:.1f} wt%); {final.n_atoms} atoms remain", flush=True)
         save_structure(SimpleNamespace(structure=final), output / 'final')
         # 環を貫通した結合は伸びたまま残り、後続の固定トポロジーMDの結合長検査で停止する。
         from polypaves.ring_piercing import ring_piercing_bonds
@@ -614,8 +664,8 @@ def main():
     parser.add_argument('--template-cache', type=Path, help='計算済み電荷／パラメータbank。省略時project内reaction_templates')
     parser.add_argument('--require-reaction-templates', action='store_true', help='成長cycle中の未知templateを計算せずエラーにする')
     parser.add_argument('--seed', type=int, default=31415)
-    parser.add_argument('--remove-unreacted-monomers', action='store_true',
-                        help='最終構造から、他の分子と結合しなかったモノマー（開始点のみのものを含む）を削除する')
+    parser.add_argument('--remove-sol-fraction', action='store_true',
+                        help='現像を模して、周期境界をまたいでつながった網目だけを残し、未反応モノマーとオリゴマーを削除する')
     parser.add_argument('--log-interval', type=float, default=10.)
     args = vars(parser.parse_args())
     smiles_file = args.pop('smiles_file')

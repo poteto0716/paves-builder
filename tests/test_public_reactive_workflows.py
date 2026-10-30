@@ -176,7 +176,44 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertEqual(json.loads((output / 'final.structure.json').read_text())['graphs'][0]['bonds'],
                              json.loads((output / 'reacted.structure.json').read_text())['graphs'][0]['bonds'])
 
-    def test_unreacted_monomers_are_removed_on_request(self):
+    def test_sol_fraction_keeps_only_the_percolating_network(self):
+        import numpy as np
+        from types import SimpleNamespace
+        class Structure(SimpleNamespace):
+            n_atoms = property(lambda self: len(self._positions))
+        spec = importlib.util.spec_from_file_location('crosslinking_sol', ROOT / 'workflows/crosslinking/crosslinking.py')
+        workflow = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(workflow)
+        def atoms(prefix, n):
+            return [dict(stable_atom_id=f'{prefix}{i}', mass=12.) for i in range(n)]
+        # A ring of 4 atoms closing across the x boundary (infinite), a finite
+        # ring of the same shape, a dimer of two monomers and one monomer.
+        network = dict(atoms=atoms('n', 4), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
+        ring = dict(atoms=atoms('r', 4), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
+        dimer = dict(atoms=atoms('d', 2), bonds=[[0, 1, 1]])
+        monomer = dict(atoms=atoms('m', 2), bonds=[[0, 1, 1]])
+        xyz = np.array([[1, 1, 1], [3.5, 1, 1], [6, 1, 1], [8.5, 1, 1],
+                        [1, 5, 1], [2.5, 5, 1], [2.5, 6.5, 1], [1, 6.5, 1],
+                        [1, 8, 5], [2.5, 8, 5], [5, 5, 5], [6.5, 5, 5]], dtype=float)
+        structure = Structure(graphs=[network, ring, dimer, monomer], _components=[0, 0, 0, 0],
+                              _positions=xyz, box_vectors=np.diag([10.] * 3), report={'atoms': 12, 'molecules': 4})
+        origin = {**{f'n{i}': i // 2 for i in range(4)}, **{f'r{i}': 2 + i // 2 for i in range(4)},
+                  'd0': 4, 'd1': 5, 'm0': 6, 'm1': 6}
+        self.assertEqual(workflow.periodic_winding(network, xyz[:4], np.diag([10.] * 3)), [True, False, False])
+        trimmed, sol = workflow.without_sol(structure, origin)
+        self.assertEqual(trimmed.graphs, [network])
+        self.assertEqual(trimmed._positions.tolist(), xyz[:4].tolist())
+        self.assertEqual(trimmed.report, {'atoms': 4, 'molecules': 1})
+        self.assertEqual((sol['sol_monomers_removed'], sol['sol_oligomers_removed'], sol['sol_atoms_removed']), (1, 2, 8))
+        self.assertAlmostEqual(sol['sol_mass_fraction'], 8 / 12)
+        self.assertEqual(sol['network_winding_axes'], [[True, False, False]])
+        self.assertEqual(len(structure.graphs), 4)  # the input is not modified
+        nothing, sol = workflow.without_sol(Structure(graphs=[ring], _components=[0], _positions=xyz[4:8],
+            box_vectors=np.diag([10.] * 3), report={}), origin)
+        self.assertIsNone(nothing)
+        self.assertEqual(sol['sol_mass_fraction'], 1)
+
+    def test_sol_removal_below_the_gel_point_stops_with_metrics(self):
         env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
         env.pop('PYTHONPATH', None)
         with tempfile.TemporaryDirectory() as temp:
@@ -188,25 +225,18 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
                 '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
-                '--minimization-iterations', '100', '--remove-unreacted-monomers'],
+                '--minimization-iterations', '100', '--remove-sol-fraction'],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
-            self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
+            # One reaction makes a dimer; nothing percolates, so the whole film would dissolve.
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertIn('No molecule percolates', completed.stderr)
             output = project / 'results/trim'
-            full = json.loads((output / 'final_with_unreacted.structure.json').read_text())
-            final = json.loads((output / 'final.structure.json').read_text())
+            full = json.loads((output / 'final_with_sol.structure.json').read_text())
             metrics = json.loads((output / 'metrics.json').read_text())
-            # One reaction joins two monomers; every other molecule is removed.
-            self.assertEqual(len(final['graphs']), 1)
-            self.assertEqual(metrics['unreacted_monomers_removed'], len(full['graphs']) - 1)
-            self.assertEqual(len(final['positions']), metrics['final_total_atoms'])
-            self.assertEqual(sum(len(g['atoms']) for g in final['graphs']), len(final['positions']))
-            self.assertEqual(final['atoms'], len(final['positions']))
-            kept = {a['stable_atom_id'] for a in final['graphs'][0]['atoms']}
-            index = [i for i, a in enumerate(a for g in full['graphs'] for a in g['atoms']) if a['stable_atom_id'] in kept]
-            self.assertEqual(final['positions'], [full['positions'][i] for i in index])
-            self.assertTrue((output / 'final.mol2').is_file())
-            from polypaves.sorption import load_network
-            self.assertEqual(len(load_network(output / 'final.structure.json').positions_nm), len(final['positions']))
+            self.assertEqual((metrics['sol_monomers_removed'], metrics['sol_oligomers_removed']),
+                             (len(full['graphs']) - 1, 1))
+            self.assertEqual(metrics['sol_mass_fraction'], 1)
+            self.assertEqual(metrics['network_molecules_kept'], 0)
 
     def test_crosslink_water_pack_and_md_resume(self):
         import numpy as np
