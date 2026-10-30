@@ -217,6 +217,34 @@ Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、
 電子分極は含まれず、ガラスの配向緩和が観測時間より長ければ収束しません。
 そのため、誘電物性を自動的に「収束済み」とは判定しません。
 
+## 網目のグラフ解析
+
+300 KのNPT観測終了後の構造について、化学グラフから網目の構造量を求め、
+`dry_result.json`の`network`とレプリカ比較CSVに保存します（MDは不要で、2万原子で1秒以下）。
+保存済みの構造だけを解析する場合は次を実行します。
+
+```bash
+python workflows/network_properties/network_graph.py replica_01/relaxed_300K.structure.json
+```
+
+H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系を1つの節点にまとめます
+（鎖の途中の芳香環は通過点で、分岐点とは数えません。周期境界を通って閉じる環は環とみなしません）。
+
+| 出力 | 定義 |
+|---|---|
+| `sol_mass_fraction` | 周期境界をまたいで自分自身の像とつながらない分子（未反応モノマー・オリゴマー）の質量分率 |
+| `dangling_mass_fraction` | ゲルのうち、1本の結合（橋）だけでつながり、その先に無限につながった部分がない部分の質量分率 |
+| `junctions`、`junction_functionality` | 残りの有効網目で、有効な結合を3本以上持つ節点（架橋点）とその官能度の分布 |
+| `effective_strands`、`strand_density_nu_e_*` | 架橋点どうしを結ぶ鎖の数と、その数密度ν_e。同じ架橋点に戻るループ（`elastically_ineffective_loops`）は除外 |
+| `Mc_g_mol` | ρN_A/ν_e |
+| `cycle_rank_density_mmol_cm3` | ξ/V（ξ = 鎖の数 − 架橋点の数） |
+| `rubbery_shear_modulus_estimates_MPa` | ゴム状態の弾性率の目安。affine：ν_e kT、phantom：ξkT/V（300 K。からみ合いは含まない） |
+| `polar_groups_*` | 脂肪族／フェノール性OH、エーテルO、未反応エポキシ環、カルボニルO、N（H数別）、芳香環、水素結合の供与H・受容原子、反応活性点（`cationic_activity`）の数・mmol/cm³・mmol/g |
+
+OH*の代理表現では、活性な鎖末端もOHとして数えます（`active_cationic_sites`と同数）。
+架橋エポキシはガラス状態なので、ν_eやゴム状態の弾性率はFlory–Rehner式など膨潤理論の入力用の値で、
+300 Kのガラスの弾性率（「弾性」の節）とは別物です。
+
 ## 弾性
 
 弾性は300 K構造から6成分×正負1%のひずみへ分岐します。

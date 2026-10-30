@@ -133,6 +133,75 @@ class MechanicalTests(unittest.TestCase):
         self.assertFalse(isotropic_moduli(-np.eye(6))['stable'])
 
 
+class NetworkGraphTests(unittest.TestCase):
+    def lattice(self):
+        """8 six-fold junctions on a periodic 2x2x2 grid (box 6) joined by 24 two-atom strands,
+        with a 9-atom loop, a dangling chain, a dangling ring and one sol molecule.
+        The grid closes 6-membered cycles only through the boundary: they are not rings."""
+        atoms, bonds, xyz = [], [], []
+        def atom(position, z=6, aromatic=False):
+            atoms.append(dict(atomic_number=z, mass=12., aromatic=aromatic))
+            xyz.append(np.asarray(position, float) % 6)
+            return len(atoms) - 1
+        sites = {(i, j, k): atom((3*i, 3*j, 3*k)) for i in range(2) for j in range(2) for k in range(2)}
+        for (i, j, k), a in sites.items():
+            for d in np.eye(3, dtype=int):
+                first, second = (atom(np.array((3*i, 3*j, 3*k)) + n * d) for n in (1, 2))
+                other = sites[tuple((np.array((i, j, k)) + d) % 2)]
+                bonds += [[a, first, 1], [first, second, 1], [second, other, 1]]
+        hub = sites[0, 0, 0]
+        loop = [atom((.1*m, .2, .3)) for m in range(1, 10)]
+        bonds += [[hub, loop[0], 1], [loop[-1], hub, 1]] + [[loop[m], loop[m+1], 1] for m in range(8)]
+        chain = [atom((3.2, 3.2, 3.4)), atom((3.2, 3.2, 3.6))]
+        bonds += [[sites[1, 1, 1], chain[0], 1], [chain[0], chain[1], 1]]
+        linker = atom((0.3, 3.3, 3.3))
+        ring = [atom((0.5 + .2*np.cos(m), 3.5 + .2*np.sin(m), 3.3), aromatic=True) for m in range(6)]
+        bonds += [[sites[0, 1, 1], linker, 1], [linker, ring[0], 1]] + [[ring[m], ring[(m+1) % 6], 4] for m in range(6)]
+        network = dict(atoms=atoms, bonds=bonds)
+        sol = dict(atoms=[dict(atomic_number=6, mass=12., aromatic=False)] * 2, bonds=[[0, 1, 1]])
+        return [network, sol], np.vstack([xyz, [[4.5, 4.5, 4.5], [4.6, 4.5, 4.5]]]), np.eye(3) * 6
+
+    def test_strands_junctions_loops_and_dangling_material(self):
+        from workflows.network_properties.network_graph import network_structure
+        graphs, xyz, box = self.lattice()
+        r = network_structure(graphs, xyz, box, temperature_K=300.)
+        total = 76
+        self.assertEqual(r['gel_molecules'], 1)
+        self.assertEqual(r['junction_functionality'], {6: 7, 8: 1})
+        self.assertEqual((r['effective_strands'], r['elastically_ineffective_loops']), (24, 1))
+        self.assertAlmostEqual(r['sol_mass_fraction'], 2 / total)
+        self.assertAlmostEqual(r['dangling_mass_fraction'], 9 / total)
+        self.assertAlmostEqual(r['active_mass_fraction'], 65 / total)
+        volume_m3 = 216e-27
+        self.assertAlmostEqual(r['strand_density_nu_e_mol_m3'], 24 / NA / volume_m3)
+        self.assertAlmostEqual(r['cycle_rank_density_mmol_cm3'], (24 - 8) / NA / volume_m3 / 1000)
+        self.assertAlmostEqual(r['Mc_g_mol'], total * 12. / 24)
+        self.assertAlmostEqual(r['rubbery_shear_modulus_estimates_MPa']['affine'],
+                               24 / volume_m3 * KB * 300 / 1e6)
+        self.assertEqual(r['polar_groups_count']['aromatic_rings'], 1)
+
+    def test_finite_molecules_are_sol(self):
+        from workflows.network_properties.network_graph import network_structure
+        graphs, xyz, box = self.lattice()
+        r = network_structure(graphs, xyz, box * 100, temperature_K=300.)  # nothing wraps in a large cell
+        self.assertEqual((r['gel_molecules'], r['effective_strands'], r['junctions']), (0, 0, 0))
+        self.assertAlmostEqual(r['sol_mass_fraction'], 1.)
+        self.assertIsNone(r['Mc_g_mol'])
+
+    def test_polar_groups(self):
+        from workflows.network_properties.network_graph import polar_groups
+        def molecule(heavy, hydrogens, bonds):
+            atoms = [dict(atomic_number=z, aromatic=False) for z in heavy] + [dict(atomic_number=1, aromatic=False)] * len(hydrogens)
+            return dict(atoms=atoms, bonds=bonds + [[parent, len(heavy) + n, 1] for n, parent in enumerate(hydrogens)])
+        methanol = molecule([6, 8], [0, 0, 0, 1], [[0, 1, 1]])
+        ether = molecule([6, 8, 6], [0, 0, 0, 2, 2, 2], [[0, 1, 1], [1, 2, 1]])
+        oxirane = molecule([6, 6, 8], [0, 0, 1, 1], [[0, 1, 1], [1, 2, 1], [2, 0, 1]])
+        acetone = molecule([6, 6, 8, 6], [0, 0, 0, 3, 3, 3], [[0, 1, 1], [1, 2, 2], [1, 3, 1]])
+        counts = polar_groups([methanol, ether, oxirane, acetone])
+        self.assertEqual(counts, dict(aliphatic_OH=1, ether_O=1, epoxide_rings=1, carbonyl_O=1,
+                                      hbond_acceptor_atoms=4, hbond_donor_H=1))
+
+
 class ConfigurationTests(unittest.TestCase):
     def test_periodic_winding_distinguishes_network_from_finite_ring(self):
         graphs = [dict(atoms=[{'mass':12.}]*3,bonds=[[0,1,1],[1,2,1],[2,0,1]])]

@@ -342,6 +342,8 @@ def dry_properties(project, cfg, replica):
         result['structure'] = structural_diagnostics(host, host, snapshot['positions'], snapshot['box'],
             0, seed=cfg['seed'] + replica, free_volume_samples=100 if cfg['smoke'] else 10000)
         result['topology'] = topology(host.graphs, snapshot['positions'], snapshot['box'])
+        from workflows.network_properties.network_graph import network_structure
+        result['network'] = network_structure(host.graphs, snapshot['positions'], snapshot['box'])
         result['npt']['sampling_checks_passed'] &= not cfg['smoke']
         result['nvt'] = nvt_properties(runner, directory / '07_nvt_300K', cfg, mass)
         write_json(directory / 'dry_result.json', result)

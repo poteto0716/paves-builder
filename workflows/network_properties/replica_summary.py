@@ -116,6 +116,28 @@ def collect(project, cfg):
             'Point-probe void fraction (300 K)', '1',
             _at(dry, 'structure', 'point_probe_void_fraction'),
             _at(dry, 'npt', 'sampling_checks_passed'))
+        network = _at(dry, 'network')
+        for path, label, unit in (
+                (('strand_density_nu_e_mmol_cm3',), 'Effective strand density nu_e', 'mmol/cm^3'),
+                (('Mc_g_mol',), 'Mc (rho / nu_e)', 'g/mol'),
+                (('junction_density_mmol_cm3',), 'Junction density', 'mmol/cm^3'),
+                (('mean_junction_functionality',), 'Mean junction functionality', '1'),
+                (('cycle_rank_density_mmol_cm3',), 'Cycle rank density xi/V', 'mmol/cm^3'),
+                (('dangling_mass_fraction',), 'Dangling mass fraction', '1'),
+                (('sol_mass_fraction',), 'Sol mass fraction', '1'),
+                (('rubbery_shear_modulus_estimates_MPa', 'affine'), 'Rubbery G estimate, affine (300 K)', 'MPa'),
+                (('rubbery_shear_modulus_estimates_MPa', 'phantom'), 'Rubbery G estimate, phantom (300 K)', 'MPa'),
+                (('polar_groups_mmol_cm3', 'aliphatic_OH'), 'Aliphatic OH', 'mmol/cm^3'),
+                (('polar_groups_mmol_cm3', 'phenolic_OH'), 'Phenolic OH', 'mmol/cm^3'),
+                (('polar_groups_mmol_cm3', 'ether_O'), 'Ether O', 'mmol/cm^3'),
+                (('polar_groups_mmol_cm3', 'epoxide_rings'), 'Unreacted epoxide', 'mmol/cm^3'),
+                (('polar_groups_mmol_cm3', 'aromatic_rings'), 'Aromatic rings', 'mmol/cm^3')):
+            # Topological counts of a fixed graph; no sampling check applies.
+            value = _at(network, *path)
+            if path[0] == 'polar_groups_mmol_cm3' and network is not None and value is None:
+                value = 0.
+            add(replica, source, dry, 'Network topology (300 K volume)', 'network.' + '.'.join(path),
+                label, unit, value, network is not None)
         for key, label, unit in (('Cv_direct_J_kg_K', 'Cv (direct NVT)', 'J/(kg K)'),
                 ('dielectric_isotropic_fixed_charge', 'Dielectric response (fixed charge)', '1')):
             add(replica, source, dry, '300 K NVT', f'nvt.{key}', label, unit,
