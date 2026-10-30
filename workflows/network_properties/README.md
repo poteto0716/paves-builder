@@ -225,16 +225,18 @@ Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、
 
 ```bash
 python workflows/network_properties/network_graph.py replica_01/relaxed_300K.structure.json \
-  --histogram-csv strands.csv --histogram-png strands.png
+  --histogram-csv strands.csv --histogram-png strands.png   # 1鎖1行のCSVと分布の図
 ```
 
-網目鎖の長さは2通りで、全分布（長さ → 本数）を出力します。
-- `strand_backbone_bonds_histogram`：架橋点の原子から架橋点の原子までの最短経路の結合数（鎖の輪郭長）。
-  環系は経路が通る原子だけを数えます（フルオレン骨格を通る鎖では9位の炭素1個）。
-- `strand_heavy_atoms_histogram`：架橋点の間にある重原子数。途中の環系は側の原子も含めて全部数える（質量的な大きさ）。
+網目鎖は、もとのモノマーの区切りに関係なく、架橋点から次の架橋点までを1本と数えます
+（重合でつながった複数モノマーにまたがる鎖も1本）。鎖ごとに次を求め、全分布を出力します。
+- 長さ`strand_heavy_atoms_histogram`：架橋点の間にある重原子数。途中の環系は側の原子も含めて全部数えます
+  （フルオレンの9位を通る鎖ではフルオレン13原子をすべて含む）。
+- 分子量`strand_molecular_weight_*`：同じ原子にHを含めた分子量（g/mol）。ヒストグラムは25 g/mol幅。
+- 主鎖の結合数`strand_backbone_bonds_histogram`：架橋点の原子から架橋点の原子までの最短経路の結合数（参考）。
 
-reportでは各レプリカの`network_strands.csv`／`network_strands.png`にも両方を出力します。
-M_c = ρN_A/ν_eは鎖の本数だけで決まり、長さの数え方には依存しません。
+`strand_table`には鎖1本ごとの3つの値が入ります。reportでは各レプリカの`network_strands.csv`（1鎖1行）と
+`network_strands.png`（3つの分布）にも出力します。M_c = ρN_A/ν_eは鎖の本数だけで決まります。
 
 H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系を1つの節点にまとめます
 （鎖の途中の芳香環は通過点で、分岐点とは数えません。周期境界を通って閉じる環は環とみなしません）。

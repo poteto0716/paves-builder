@@ -307,10 +307,8 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
                 strands += 1
                 strand_lengths.append(path_atoms)
                 strand_masses.append(path_mass)
-                bonds_along = _backbone_bonds(atom_edges, members[start], members[node],
-                                              {a for x in interior for a in members[x]})
-                if bonds_along is not None:
-                    backbone_bonds.append(bonds_along)
+                backbone_bonds.append(_backbone_bonds(atom_edges, members[start], members[node],
+                                                      {a for x in interior for a in members[x]}))
         # Junction-free active cycles (a chain wrapping the cell by itself).
         for x in active_nodes - junctions:
             for _, k, _ in active[x]:
@@ -328,11 +326,15 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
                     strands += 1
                     strand_lengths.append(sum(node_size[y] for y in seen))
                     strand_masses.append(sum(node_mass[y] for y in seen))
+                    backbone_bonds.append(None)
     junction_count = sum(junction_degrees.values())
     density_kg_m3 = total_mass / 1000 / NA / volume_m3
     nu_e = strands / NA / volume_m3            # mol/m^3
     xi = (strands - junction_count) / NA / volume_m3
     lengths = np.asarray(strand_lengths, dtype=float)
+    contour = [b for b in backbone_bonds if b is not None]
+    strand_mass = np.asarray(strand_masses, dtype=float)
+    mass_bin = 25.
     polar = polar_groups(graphs)
     per_volume = 1 / NA / volume_m3 / 1000       # count -> mmol/cm^3 (= mol/L)
     return dict(
@@ -355,13 +357,22 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
         Mc_g_mol=float(density_kg_m3 * 1000 / nu_e) if strands else None,
         strand_heavy_atoms=dict(mean=float(lengths.mean()), median=float(np.median(lengths)),
                                 min=int(lengths.min()), max=int(lengths.max())) if strands else None,
-        mean_strand_interior_mass_g_mol=float(np.mean(strand_masses)) if strands else None,
-        # Every effective strand: interior heavy atoms (ring systems count all their atoms) -> count.
+        # Strand length: interior heavy atoms between the two junctions, whole ring systems
+        # included (a pendant fluorene counts); molecular weight includes their hydrogens.
         strand_heavy_atoms_histogram={int(k): v for k, v in sorted(Counter(strand_lengths).items())},
+        strand_molecular_weight_g_mol=dict(mean=float(strand_mass.mean()), median=float(np.median(strand_mass)),
+                                           min=float(strand_mass.min()), max=float(strand_mass.max())) if strands else None,
+        strand_molecular_weight_bin_g_mol=mass_bin,
+        strand_molecular_weight_histogram={int(k * mass_bin): v for k, v in
+                                           sorted(Counter(np.floor(strand_mass / mass_bin).astype(int).tolist()).items())},
         # Contour: bonds on the shortest path between the two junction atoms (side atoms of rings excluded).
-        strand_backbone_bonds=dict(mean=float(np.mean(backbone_bonds)), median=float(np.median(backbone_bonds)),
-                                   min=int(min(backbone_bonds)), max=int(max(backbone_bonds))) if backbone_bonds else None,
-        strand_backbone_bonds_histogram={int(k): v for k, v in sorted(Counter(backbone_bonds).items())},
+        strand_backbone_bonds=dict(mean=float(np.mean(contour)), median=float(np.median(contour)),
+                                   min=int(min(contour)), max=int(max(contour))) if contour else None,
+        strand_backbone_bonds_histogram={int(k): v for k, v in sorted(Counter(contour).items())},
+        # One row per effective strand, whatever monomers it was built from.
+        strand_table=dict(columns=['interior_heavy_atoms', 'molecular_weight_g_mol', 'backbone_bonds'],
+                          rows=[[int(a), round(float(m), 4), b] for a, m, b in
+                                zip(strand_lengths, strand_masses, backbone_bonds)]),
         rubbery_shear_modulus_estimates_MPa=dict(
             temperature_K=temperature_K,
             affine=float(nu_e * KB * NA * temperature_K / 1e6),
@@ -392,15 +403,18 @@ def analyze_file(path, temperature_K=300.):
 
 
 def plot_strand_histogram(result, path, title=''):
-    """Strand length histograms: backbone bonds (contour) and interior heavy atoms (size)."""
+    """Strand length (interior heavy atoms), molecular weight and backbone-bond histograms."""
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-    for ax, key, label in ((axes[0], 'strand_backbone_bonds_histogram', 'Backbone bonds between junctions'),
-                           (axes[1], 'strand_heavy_atoms_histogram', 'Interior heavy atoms (whole ring systems)')):
-        histogram = {int(k): v for k, v in result[key].items()}
-        ax.bar(list(histogram), list(histogram.values()), width=.8)
+    fig, axes = plt.subplots(1, 3, figsize=(15, 3.6))
+    panels = ((axes[0], 'strand_heavy_atoms_histogram', 'Strand length / interior heavy atoms', .8),
+              (axes[1], 'strand_molecular_weight_histogram', 'Strand molecular weight / g mol$^{-1}$',
+               result['strand_molecular_weight_bin_g_mol'] * .9),
+              (axes[2], 'strand_backbone_bonds_histogram', 'Backbone bonds between junctions', .8))
+    for ax, key, label, width in panels:
+        histogram = {float(k): v for k, v in result[key].items()}
+        ax.bar(list(histogram), list(histogram.values()), width=width, align='edge' if 'weight' in key else 'center')
         ax.set(xlabel=label, ylabel='Strands')
     fig.suptitle(title or f"{result['effective_strands']} effective strands, Mc {result['Mc_g_mol']:.0f} g/mol")
     fig.tight_layout()
@@ -409,21 +423,20 @@ def plot_strand_histogram(result, path, title=''):
 
 
 def write_strand_csv(result, path):
-    """Both histograms in one table: length, strands by backbone bonds, strands by interior heavy atoms."""
-    bonds = {int(k): v for k, v in result['strand_backbone_bonds_histogram'].items()}
-    atoms = {int(k): v for k, v in result['strand_heavy_atoms_histogram'].items()}
+    """One row per effective strand."""
+    table = result['strand_table']
     with Path(path).open('w') as out:
-        out.write('length,strands_by_backbone_bonds,strands_by_interior_heavy_atoms\n')
-        for length in sorted(set(bonds) | set(atoms)):
-            out.write(f'{length},{bonds.get(length, 0)},{atoms.get(length, 0)}\n')
+        out.write(','.join(table['columns']) + '\n')
+        for row in table['rows']:
+            out.write(','.join('' if v is None else str(v) for v in row) + '\n')
 
 
 if __name__ == '__main__':
     import argparse
     parser = argparse.ArgumentParser(description='Network graph analysis of a saved *.structure.json')
     parser.add_argument('structure', type=Path)
-    parser.add_argument('--histogram-csv', type=Path, help='write the strand length histogram as CSV')
-    parser.add_argument('--histogram-png', type=Path, help='plot the strand length histogram')
+    parser.add_argument('--histogram-csv', type=Path, help='write one row per strand (heavy atoms, molecular weight, backbone bonds) as CSV')
+    parser.add_argument('--histogram-png', type=Path, help='plot the strand length, molecular weight and backbone-bond histograms')
     args = parser.parse_args()
     result = analyze_file(args.structure)
     if args.histogram_csv:

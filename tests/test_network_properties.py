@@ -182,6 +182,8 @@ class NetworkGraphTests(unittest.TestCase):
         # 24 strands of two interior atoms; the loop is not a strand.
         self.assertEqual(r['strand_heavy_atoms_histogram'], {2: 24})
         self.assertEqual(r['strand_backbone_bonds_histogram'], {3: 24})
+        self.assertEqual(r['strand_molecular_weight_histogram'], {0: 24})  # 2 x 12 g/mol
+        self.assertEqual(r['strand_table']['rows'], [[2, 24.0, 3]] * 24)
 
     def test_finite_molecules_are_sol(self):
         from workflows.network_properties.network_graph import network_structure
