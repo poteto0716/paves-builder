@@ -24,7 +24,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 import json
 from pathlib import Path
-import sys
 
 import numpy as np
 
@@ -320,6 +319,8 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300.):
         strand_heavy_atoms=dict(mean=float(lengths.mean()), median=float(np.median(lengths)),
                                 min=int(lengths.min()), max=int(lengths.max())) if strands else None,
         mean_strand_interior_mass_g_mol=float(np.mean(strand_masses)) if strands else None,
+        # Every effective strand: interior heavy atoms (ring systems count all their atoms) -> count.
+        strand_heavy_atoms_histogram={int(k): v for k, v in sorted(Counter(strand_lengths).items())},
         rubbery_shear_modulus_estimates_MPa=dict(
             temperature_K=temperature_K,
             affine=float(nu_e * KB * NA * temperature_K / 1e6),
@@ -349,7 +350,38 @@ def analyze_file(path, temperature_K=300.):
                              np.asarray(data['box_vectors']) / 10., temperature_K)
 
 
+def plot_strand_histogram(result, path, title=''):
+    """Bar chart of the strand length histogram (interior heavy atoms)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import pyplot as plt
+    histogram = {int(k): v for k, v in result['strand_heavy_atoms_histogram'].items()}
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    ax.bar(list(histogram), list(histogram.values()), width=.8)
+    ax.set(xlabel='Strand length / interior heavy atoms', ylabel='Strands',
+           title=title or f"{result['effective_strands']} effective strands, Mc {result['Mc_g_mol']:.0f} g/mol")
+    fig.tight_layout()
+    fig.savefig(path, dpi=160)
+    plt.close(fig)
+
+
+def write_strand_csv(result, path):
+    with Path(path).open('w') as out:
+        out.write('interior_heavy_atoms,strands\n')
+        for length, count in result['strand_heavy_atoms_histogram'].items():
+            out.write(f'{length},{count}\n')
+
+
 if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        sys.exit('usage: network_graph.py STRUCTURE.json')
-    print(json.dumps(analyze_file(sys.argv[1]), indent=2))
+    import argparse
+    parser = argparse.ArgumentParser(description='Network graph analysis of a saved *.structure.json')
+    parser.add_argument('structure', type=Path)
+    parser.add_argument('--histogram-csv', type=Path, help='write the strand length histogram as CSV')
+    parser.add_argument('--histogram-png', type=Path, help='plot the strand length histogram')
+    args = parser.parse_args()
+    result = analyze_file(args.structure)
+    if args.histogram_csv:
+        write_strand_csv(result, args.histogram_csv)
+    if args.histogram_png and result['effective_strands']:
+        plot_strand_histogram(result, args.histogram_png)
+    print(json.dumps(result, indent=2))

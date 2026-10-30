@@ -179,6 +179,8 @@ class NetworkGraphTests(unittest.TestCase):
         self.assertAlmostEqual(r['rubbery_shear_modulus_estimates_MPa']['affine'],
                                24 / volume_m3 * KB * 300 / 1e6)
         self.assertEqual(r['polar_groups_count']['aromatic_rings'], 1)
+        # 24 strands of two interior atoms; the loop is not a strand.
+        self.assertEqual(r['strand_heavy_atoms_histogram'], {2: 24})
 
     def test_finite_molecules_are_sol(self):
         from workflows.network_properties.network_graph import network_structure

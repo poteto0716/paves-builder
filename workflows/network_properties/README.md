@@ -224,8 +224,13 @@ Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、
 保存済みの構造だけを解析する場合は次を実行します。
 
 ```bash
-python workflows/network_properties/network_graph.py replica_01/relaxed_300K.structure.json
+python workflows/network_properties/network_graph.py replica_01/relaxed_300K.structure.json \
+  --histogram-csv strands.csv --histogram-png strands.png
 ```
+
+網目鎖の長さ（架橋点の間にある重原子数。途中の環系はその全原子を数える）の全分布は
+`strand_heavy_atoms_histogram`（長さ → 本数）に入り、reportでは各レプリカの
+`network_strands.csv`／`network_strands.png`にも出力します。
 
 H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系を1つの節点にまとめます
 （鎖の途中の芳香環は通過点で、分岐点とは数えません。周期境界を通って閉じる環は環とみなしません）。

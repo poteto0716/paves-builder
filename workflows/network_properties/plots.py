@@ -40,6 +40,12 @@ def render(project):
         if dry['smoke']:
             fig.suptitle('SMOKE ONLY — no physical interpretation')
         save(fig,base/'thermal_diagnostics.png',f'{base.name}: cooling and density')
+        network = dry.get('network')
+        if network and network.get('effective_strands'):
+            from workflows.network_properties.network_graph import plot_strand_histogram, write_strand_csv
+            write_strand_csv(network, base/'network_strands.csv')
+            plot_strand_histogram(network, base/'network_strands.png')
+            figures.append((f'{base.name}: network strand lengths', str((base/'network_strands.png').relative_to(project))))
         for path in sorted(base.glob('solvents/*/result.json')):
             result = json.loads(path.read_text())
             fe = result['infinite_dilution_free_energy']
