@@ -3,8 +3,9 @@
 activations:
   - name: neutral_ring_opening_seed
     # C-O-C三員環を検索。:1/:2/:3 はこのルール内の原子ラベル。
+    # 切断するC1はH2個の末端CH2に限定（成長反応と同じSN2型の位置選択）。
     # +0 = formal charge 0、X2 = Hを含む結合相手が2個。
-    target_smarts: "[C:1]1[O;+0;X2:2][C:3]1"
+    target_smarts: "[C;H2:1]1[O;+0;X2:2][C:3]1"
     # 開環後のOH酸素（map 2）へ、力場とは独立したmetadataを付ける。
     active_atom_map: 2
     reaction_state_to_assign: cationic_activity

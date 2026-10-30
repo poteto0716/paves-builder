@@ -41,7 +41,7 @@ YAMLを編集する前に、後述の「PythonとYAMLの優先関係」を確認
 # #以降はコメント。ここはプログラムに読まれない。
 activations:                         # キー: 値。コロンの後に空白を入れる
   - name: neutral_ring_opening_seed  # - はリストの1項目。ここでは1つのルール
-    target_smarts: "[C:1]1[O;+0;X2:2][C:3]1"
+    target_smarts: "[C;H2:1]1[O;+0;X2:2][C:3]1"
     required_atom_states:
       2: null                       # map 2にはstateがないことを要求
     selection: fraction
@@ -66,12 +66,14 @@ activations:                         # キー: 値。コロンの後に空白を
 初期化の検索パターンは次です。
 
 ```text
-[C:1]1[O;+0;X2:2][C:3]1
+[C;H2:1]1[O;+0;X2:2][C:3]1
 ```
 
 | 記号 | 意味 |
 |---|---|
 | `C` | 非芳香族の炭素を検索する |
+| `H2` | 結合しているHが2個（explicit Hも数える）。末端CH2だけに一致する |
+| `;` | 同じ原子への条件のAND |
 | `O` | 非芳香族の酸素を検索する |
 | `+0` | formal chargeが0であることを要求する |
 | `X2` | Hを含む結合相手の数が2であることを要求する |
@@ -205,7 +207,7 @@ reactions:
   - name: epoxy_OH_relay
     reactants:
       - "[O;+0;X2:1]-[#1:5]"
-      - "[C:2]1[O;+0;X2:3][C:4]1"
+      - "[C;H2:2]1[O;+0;X2:3][C:4]1"
     products:
       - "[O;+0:1]-[C:2]-[C:4]-[O;+0:3]-[#1:5]"
     reactive_atom_maps: [1, 2]
@@ -227,7 +229,7 @@ reactions:
 | map | 反応前 | 反応後 |
 |---|---|---|
 | 1 | activityを持つ旧OH酸素 | 新しいエーテル酸素。stateを解除 |
-| 2 | epoxideの攻撃される炭素 | 旧OH酸素1と結合する炭素 |
+| 2 | epoxideの攻撃される末端CH2炭素 | 旧OH酸素1と結合する炭素 |
 | 3 | stateのないepoxide酸素 | H5を受け取る新OH酸素。activityを付与 |
 | 4 | epoxideのもう一方の炭素 | C2とO3への結合を保つ |
 | 5 | 旧OHに結合する既存H | 新OHに結合する同じH |
@@ -346,7 +348,7 @@ runner = ReactiveMDRunner(
 | methyl glycidyl ether `COCC1CO1` | 1 | この表では検索のみ |
 | DGEBA `CC(C)(c1ccc(OCC2CO2)cc1)c1ccc(OCC2CO2)cc1` | 2 | この表では検索のみ。生成物のSage割り当ては別途確認 |
 | TMP triglycidyl ether（このexampleのモノマー） | 3 | 8分子・1開始点・18成長反応、全stepでstock Sage割り当て／System再構築／有限エネルギー／CPU MDを検証済み |
-| cyclohexene oxide `C1CCC2OC2C1` | 1 | この表では検索のみ。攻撃位置や環の扱いは個別確認が必要 |
+| cyclohexene oxide `C1CCC2OC2C1` | 0 | 末端CH2を持たないので対象外。使うなら攻撃Cの条件を変える |
 | tetrahydrofuran `C1CCOC1` | 0 | C–O–C三員環ではないので対象外 |
 | aziridine `C1CN1` | 0 | 環原子がOではないので対象外 |
 
@@ -357,19 +359,15 @@ runner = ReactiveMDRunner(
 
 ### 攻撃位置と立体化学
 
-現在は2つのring Cをどちらも `[C]` として検索するため、置換基に基づく攻撃位置の優先性を定義していません。
-異なる向きのマッチは、候補の距離と選択方針に応じて選ばれます。
-特定のcarbon環境だけを攻撃対象にするなら、その条件をreactant SMARTSへ追加します。
+成長反応の攻撃C2と初期化の切断C1は、どちらも `[C;H2]`（末端CH2）に限定しています。
+塩基性・求核的なSN2型開環（アミン硬化、アルコキシドなど）で、置換基の少ない炭素がほぼ選択的に攻撃される位置選択を表します。
+そのためglycidyl etherの結合は常に `O–CH2–CH(OH)–` の向き（head-to-tail）になり、CH側への攻撃は起こりません。
+初期化では切断したCH2がCH3になり、OHは第二級炭素CHに付きます。
 
-```yaml
-# 書式例：攻撃C2をHを2個持つ炭素に限定する。
-# 内部epoxide等を除外し得るので、対象分子に合わせて判断する。
-reactants:
-  - "[O;+0;X2:1]-[#1:5]"
-  - "[C;H2:2]1[O;+0;X2:3][C:4]1"
-```
+酸性・カチオン条件のようにCH側への攻撃も混ぜたい場合は、両方のSMARTSを `[C:2]` / `[C:1]` に戻します。
+その場合、異なる向きのマッチは候補の距離と選択方針で選ばれ、エネルギー的な優先性は入りません。
+末端CH2を持たない内部epoxide（cyclohexene oxide等）は、`[C;H2]` のままでは検索されません。
 
-この変更をするなら、初期化の `target_smarts` も必要に応じて同じ対象に絞ります。
 また、現versionはproduct側の明示的な `@` 等のstereochemistry指定に対応していません。
 反応時の新しい立体配置や反転を自動で決定する機能もありません。
 検索一致したことだけで、立体化学まで目的どおりになるとは判断できません。
@@ -420,7 +418,7 @@ MDのplatform指定はexampleでCUDAを使います。CPU確認をしたい場�
 | YAMLを読み込めない | インデント、SMARTSの引用符、数値型、未知キー、count/fractionの二重指定 |
 | 初期化0件 | epoxide数に対するfloor計算、target SMARTS、required state、Python側の上書き |
 | 成長候補0件 | activityを持つOHの存在、未反応epoxide、explicit H、距離cutoff、component条件、graph separation |
-| 想定と違うcarbonに結合する | attack map 2のSMARTS条件。現在のgeneric Cは攻撃位置を選り分けない |
+| 想定と違うcarbonに結合する | attack map 2のSMARTS条件。現在は `[C;H2]` で末端CH2だけを攻撃する |
 | Sageで失敗する | 初期化後／生成物の具体的な結合環境と未割り当てterm。SMARTS一致とFF対応を区別する |
 | activityが増えたように見える | OVITOの `ReactionActive` と履歴のstate数を確認。`ReactiveSite` は未反応epoxideも含む |
 
