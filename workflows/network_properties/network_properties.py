@@ -31,7 +31,7 @@ DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=.5,
     alchemical_windows=22, alchemical_equilibration_ps=100.,
     alchemical_sampling_ps=500., standard_density_nm3=.602214076,
     mechanical=True, nvt_production_ps=10000.,
-    elastic_strain=.005, elastic_equilibration_ps=100., elastic_production_ps=500.,
+    elastic_strain=.01, elastic_equilibration_ps=200., elastic_production_ps=1000.,
     smoke=False)
 
 

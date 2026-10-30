@@ -107,12 +107,12 @@ def run_mechanical(base, cfg, seed):
     if (directory / 'result.json').exists():
         return
     host = load_network(Path(base) / 'relaxed_300K.structure.json')
-    strain = cfg.get('elastic_strain', .005)
+    strain = cfg.get('elastic_strain', .01)
     if not 0 < strain < .03:
         raise ValueError('elastic_strain must lie between 0 and 0.03')
     timestep = .25
-    equil_ps = .001 if cfg['smoke'] else cfg.get('elastic_equilibration_ps', 100.)
-    production_ps = .004 if cfg['smoke'] else cfg.get('elastic_production_ps', 500.)
+    equil_ps = .001 if cfg['smoke'] else cfg.get('elastic_equilibration_ps', 200.)
+    production_ps = .004 if cfg['smoke'] else cfg.get('elastic_production_ps', 1000.)
     interval_ps = cfg['sample_interval_ps']
     means, sems = {}, {}
     for column, basis in enumerate(bases()):
