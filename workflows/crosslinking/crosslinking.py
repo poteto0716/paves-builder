@@ -1,4 +1,9 @@
-"""SMILES／総原子数からpure epoxyをpackし、初期NPT緩和後に反応MDを行う。
+"""SMILES／総原子数から単一モノマーをpackし、初期NPT緩和後に反応MDを行う。
+
+既定はエポキシ（activation.yaml／reactions.yaml）。オキセタンなど他の環は、
+そのactivation.yamlのtarget_smartsに一致するYAMLを使う（例: oxetane/）。
+開始点0（--activation-count 0または--activation-fraction 0）なら反応cycleを省き、
+packと緩和だけの未反応モノマー構造を保存する。
 
 packing後の加圧NPT: 300 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
 初期NPT: 300 K、1 atm、1 fs × 1,000,000 step = 1 ns。
@@ -126,7 +131,11 @@ def load_relaxation_stages(value):
         return value
     import yaml
     path = Path(value)
-    data = yaml.safe_load(path.read_text() if path.is_file() else value)
+    try:
+        is_file = path.is_file()
+    except OSError:  # JSON text longer than a file name may be
+        is_file = False
+    data = yaml.safe_load(path.read_text() if is_file else value)
     if isinstance(data, dict) and set(data) == {'stages'}:
         data = data['stages']
     return data
@@ -192,11 +201,11 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
         raise ValueError('atom_count_mode must be above, nearest, floor or exact')
     if (count is None) == (fraction is None):
         raise ValueError('Specify one activation count or fraction')
-    if count is not None and (type(count) is not int or count < 1):
-        raise ValueError('activation_count must be a positive integer')
+    if count is not None and (type(count) is not int or count < 0):
+        raise ValueError('activation_count must be an integer >= 0')
     if fraction is not None and (isinstance(fraction, bool) or not math.isfinite(fraction)
-                                 or not 0 < fraction < 1):
-        raise ValueError('activation_fraction must be between 0 and 1, excluding endpoints')
+                                 or not 0 <= fraction < 1):
+        raise ValueError('activation_fraction must satisfy 0 <= fraction < 1')
 
     def size(n):
         activations = count if count is not None else math.floor(fraction * (sites_per_molecule * n))
@@ -217,8 +226,11 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
     actual_atoms, activations = size(molecules)
     if mode == 'exact' and actual_atoms != total_atoms:
         raise ValueError(f'exact total_atoms is unreachable; neighboring totals are {size(lower)[0]} and {size(upper)[0]}')
-    if molecules < 1 or activations < 1 or activations >= sites_per_molecule * molecules:
-        raise ValueError('Size must allow at least one start and one remaining epoxide')
+    if molecules < 1:
+        raise ValueError('total_atoms is smaller than one molecule')
+    # 開始点0は未反応モノマーの計算。反応点がない分子でもよい。
+    if activations and activations >= sites_per_molecule * molecules:
+        raise ValueError('Size must allow at least one start and one remaining reactive site')
     return dict(monomers=molecules, activation_count=activations, actual_total_atoms=actual_atoms,
                 packed_atoms=molecules * atoms_per_molecule,
                 initial_epoxide_sites=molecules * sites_per_molecule)
@@ -355,10 +367,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         raise ValueError('target_conversion must be between 0 and 1')
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None or len(Chem.GetMolFrags(molecule)) != 1:
-        raise ValueError('smiles must describe one connected epoxy molecule')
-    epoxides = molecule.GetSubstructMatches(Chem.MolFromSmarts('[C]1[O;+0;X2][C]1'))
-    if not epoxides:
-        raise ValueError('smiles must contain a neutral C-O-C epoxide ring')
+        raise ValueError('smiles must describe one connected molecule')
     # Kekulé入力（C1=CC=CC=C1など）はそのまま単結合/二重結合のgraphになる。反応後の
     # 再検証で原子だけが芳香族になり、局所フラグメントが環の単結合で切れて
     # "non-ring atom N marked aromatic"で停止するため、芳香族表記の正規SMILESでpackする。
@@ -375,7 +384,16 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             activation_count = activation_rule.count
         else:
             raise ValueError('This example supports count or fraction activation selection')
-    sites_per_molecule = len(Chem.AddHs(molecule).GetSubstructMatches(Chem.MolFromSmarts(activation_rule.target_smarts)))
+    # 反応点はエポキシ固定ではなく、activation.yamlの開環対象（target_smarts）で数える。
+    target = Chem.MolFromSmarts(activation_rule.target_smarts)
+    if target is None:
+        raise ValueError(f'activation.yaml target_smarts is invalid: {activation_rule.target_smarts}')
+    sites_per_molecule = len(Chem.AddHs(molecule).GetSubstructMatches(target))
+    starts_requested = activation_count if activation_count is not None else activation_fraction
+    if not sites_per_molecule and starts_requested:
+        raise ValueError(f'smiles has no site matching activation.yaml target_smarts '
+                         f'{activation_rule.target_smarts}; use YAMLs for this ring (e.g. oxetane/) '
+                         'or 0 starts for an unreacted monomer')
     plan = plan_size(total_atoms, atoms_per_molecule, sites_per_molecule,
                      added_per_site=len(activation_rule.atoms_to_add), count=activation_count,
                      fraction=activation_fraction, mode=atom_count_mode)
@@ -418,7 +436,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
 
     # p.Solventはpackへの分子指定。開始点で追加するHを原子予算から引く。
     print(f"Project {project}: {plan['monomers']} molecules, {plan['actual_total_atoms']} atoms, "
-          f"{plan['activation_count']}/{plan['initial_epoxide_sites']} epoxide starts", flush=True)
+          f"{plan['activation_count']}/{plan['initial_epoxide_sites']} reactive-site starts", flush=True)
     structure = p.pack(
         [p.Solvent(smiles, name='epoxy')], counts=[plan['monomers']],
         density=density, temperature=temperature,
@@ -448,6 +466,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     activated = initializer.apply(activation_rule, **selection, validator=validate_initialization)
     if structure.n_atoms != plan['actual_total_atoms'] or activated.number_of_activations != plan['activation_count']:
         raise RuntimeError('Activation atom count differs from the packing budget')
+    if not plan['activation_count'] and cycles:
+        # 活性点がなければ反応は起こらない。空のcycle（各cycleのNVT/NPT）を回さない。
+        print('No activation sites: skipping reaction cycles (unreacted monomer)', flush=True)
+        cycles = 0
     initializer.history.write_jsonl(output / 'activation_history.jsonl')
     runner = ReactiveMDRunner(
         structure=structure, forcefield=field, reactions=rules,
@@ -472,7 +494,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     packed_atoms=packed_atoms, actual_total_atoms=structure.n_atoms,
                     monomers=plan['monomers'], activation_count=plan['activation_count'],
                     activation_fraction=activation_fraction, initial_epoxide_sites=plan['initial_epoxide_sites'],
-                    actual_activation_fraction=plan['activation_count'] / plan['initial_epoxide_sites'],
+                    actual_activation_fraction=(plan['activation_count'] / plan['initial_epoxide_sites']
+                                                if plan['initial_epoxide_sites'] else 0.),
+                    initial_reactive_sites=plan['initial_epoxide_sites'],
+                    activation_target_smarts=activation_rule.target_smarts,
                     density_g_cm3=density, temperature_K=temperature, pressure_atm=pressure_atm,
                     compression=asdict(compression) if compression else None,
                     compression_pressure_MPa=compression_pressure_mpa if compression else None,
@@ -513,7 +538,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                        'initiated_sites': plan['activation_count'],
                        'initial_epoxide_sites': plan['initial_epoxide_sites'],
                        'epoxide_consumption_including_activation':
-                           (plan['activation_count'] + len(active.history)) / plan['initial_epoxide_sites'],
+                           ((plan['activation_count'] + len(active.history)) / plan['initial_epoxide_sites']
+                            if plan['initial_epoxide_sites'] else 0.),
                        'target_total_atoms': total_atoms, 'actual_total_atoms': structure.n_atoms,
                        'atom_count_difference': structure.n_atoms - total_atoms,
                        'platform': active.simulation.context.getPlatform().getName()}
@@ -598,7 +624,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     inputs = parser.add_mutually_exclusive_group()
-    inputs.add_argument('--smiles', help='エポキシ1分子のSMILES')
+    inputs.add_argument('--smiles', help='モノマー1分子のSMILES（既定TMP triglycidyl ether）')
     inputs.add_argument('--smiles-file', type=Path, help='SMILESを1つだけ書いたテキストファイル')
     parser.add_argument('--total-atoms', type=int, default=DEFAULT_TOTAL_ATOMS,
                         help='開始点の追加Hを含む目標総原子数（既定20000）')
@@ -608,8 +634,9 @@ def main():
     parser.add_argument('--density', type=float, default=.5,
                         help='packing時の密度 g/cm^3（既定0.5。加圧NPTで縮める）')
     starts = parser.add_mutually_exclusive_group()
-    starts.add_argument('--activation-count', type=int)
-    starts.add_argument('--activation-fraction', type=float, help='開始点の割合。省略時はactivation.yamlを使用')
+    starts.add_argument('--activation-count', type=int, help='開始点の数。0なら反応させない')
+    starts.add_argument('--activation-fraction', type=float,
+                        help='開始点の割合（0以上1未満）。0なら反応させない。省略時はactivation.yamlを使用')
     parser.add_argument('--project', required=True, help='保存先: カレントのresults/<project>')
     parser.add_argument('--force', action='store_true', help='既存projectの内容を削除して再実行する')
     parser.add_argument('--save-trajectory', action='store_true',

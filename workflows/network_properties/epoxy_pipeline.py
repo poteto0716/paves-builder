@@ -1,4 +1,8 @@
-"""Per-replica epoxy packing/crosslinking using the public crosslinking CLI."""
+"""Per-replica monomer packing/crosslinking using the public crosslinking CLI.
+
+The input mode keeps its historical name 'epoxy'; the ring chemistry comes
+from the activation/reaction YAMLs (epoxide by default, oxetane preset).
+"""
 from __future__ import annotations
 
 import hashlib
@@ -14,6 +18,12 @@ from collections import deque
 ROOT = Path(__file__).resolve().parents[2]
 CROSSLINKING = ROOT / 'workflows/crosslinking'
 DEFINITIONS = ('activation.yaml', 'reactions.yaml')
+# Ring-opening presets: YAML directory and default monomer.
+CHEMISTRIES = {
+    'epoxy': dict(definitions=CROSSLINKING, smiles=None),  # crosslinking.py default, TMP triglycidyl ether
+    # 3-ethyl-3-{[(3-ethyloxetan-3-yl)methoxy]methyl}oxetane (di-oxetane, "OXT-221").
+    'oxetane': dict(definitions=CROSSLINKING / 'oxetane', smiles='CCC1(COCC2(CC)COC2)COC1'),
+}
 CHILD_ERROR = re.compile(r'^[\w.]+(?:Error|Exception|Interrupt)\b')
 
 
@@ -25,9 +35,16 @@ def defaults():
             if name not in reserved}
 
 
+def zero_starts(options):
+    """True when no activation site is requested: an unreacted monomer."""
+    return options.get('activation_count') == 0 or options.get('activation_fraction') == 0
+
+
 def configure(args):
     options = defaults()
-    overrides = dict(smiles=getattr(args, 'epoxy_smiles', None),
+    chemistry = getattr(args, 'chemistry', None) or 'epoxy'
+    preset = CHEMISTRIES[chemistry]
+    overrides = dict(smiles=getattr(args, 'epoxy_smiles', None) or preset['smiles'],
         total_atoms=getattr(args, 'total_atoms', None), atom_count_mode=getattr(args, 'atom_count_mode', None),
         cycles=getattr(args, 'cycles', None), target_conversion=getattr(args, 'target_conversion', None),
         activation_fraction=getattr(args, 'activation_fraction', None),
@@ -52,6 +69,9 @@ def configure(args):
     options.update({k:v for k,v in overrides.items() if v is not None})
     if overrides['reaction_cutoff'] is None:
         options['reaction_cutoff'] = min(options['reaction_cutoff'], options['max_reaction_cutoff'])
+    if zero_starts(options):
+        # No active site, no reaction: skip the cycles; a conversion target does not apply.
+        options.update(cycles=0, target_conversion=None)
     if args.smoke:
         options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2, template_workers=1,
             final_relaxation_steps=2, final_md_steps=2,
@@ -61,9 +81,11 @@ def configure(args):
             options['total_atoms'] = 500
         if overrides['activation_count'] is None and overrides['activation_fraction'] is None:
             options['activation_count'] = 1
+        if zero_starts(options):
+            options['cycles'] = 0
     paths = dict(zip(DEFINITIONS, (getattr(args, 'activation_yaml', None),
                                   getattr(args, 'reactions_yaml', None))))
-    definitions = {name: (Path(path) if path else CROSSLINKING / name).read_bytes()
+    definitions = {name: (Path(path) if path else preset['definitions'] / name).read_bytes()
                    for name, path in paths.items()}
     from workflows.crosslinking.crosslinking import activation_yaml_with_selection
     # The project's copied activation.yaml states the start count/fraction actually used.
@@ -71,7 +93,7 @@ def configure(args):
         count=options['activation_count'], fraction=options['activation_fraction']).encode()
     hashes = {name: hashlib.sha256(content).hexdigest() for name,content in definitions.items()}
     fingerprint = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
-    return dict(input_mode='epoxy', crosslinking=options, definition_sha256=hashes,
+    return dict(input_mode='epoxy', chemistry=chemistry, crosslinking=options, definition_sha256=hashes,
                 input_sha256=fingerprint, schema_version=2), definitions
 
 
@@ -121,6 +143,12 @@ def validate(cfg):
     count, fraction = options['activation_count'], options['activation_fraction']
     if count is not None and fraction is not None:
         raise ValueError('use one activation count or fraction')
+    if count is not None and (type(count) is not int or count < 0):
+        raise ValueError('crosslinking.activation_count must be an integer >= 0')
+    if fraction is not None and (isinstance(fraction, bool) or not 0 <= fraction < 1):
+        raise ValueError('crosslinking.activation_fraction must satisfy 0 <= fraction < 1')
+    if cfg.get('chemistry', 'epoxy') not in CHEMISTRIES:
+        raise ValueError(f'chemistry must be one of {sorted(CHEMISTRIES)}')
 
 
 def network_path(project, cfg, replica):
@@ -130,9 +158,10 @@ def network_path(project, cfg, replica):
 
 
 def build_command(project, cfg, replica):
+    from workflows.network_properties.execution import replica_seed
     work = Path(project) / f'replica_{replica:02d}/crosslinking'
     command = [sys.executable, '-u', str(CROSSLINKING / 'crosslinking.py'),
-               '--project', 'epoxy', '--seed', str(cfg['seed'] + replica),
+               '--project', 'epoxy', '--seed', str(replica_seed(project, cfg, replica)),
                '--platform', cfg['platform'], '--template-cache', str(work / 'reaction_templates')]
     for key, value in cfg['crosslinking'].items():
         if value is None or value is False:
@@ -150,24 +179,25 @@ def build_command(project, cfg, replica):
 
 def ensure_network(project, cfg, replica, lock=None):
     from workflows.network_properties.network_properties import digest, write_json
-    from workflows.network_properties.execution import die_with_parent
+    from workflows.network_properties.execution import die_with_parent, replica_seed
     source = network_path(project, cfg, replica)
     if cfg.get('input_mode') != 'epoxy':
         return source
+    seed = replica_seed(project, cfg, replica)
     base = Path(project) / f'replica_{replica:02d}'
     work = base / 'crosslinking'
     work.mkdir(parents=True, exist_ok=True)
     marker = work / 'done.json'
     if marker.is_file():
         saved = json.loads(marker.read_text())
-        if saved['seed'] != cfg['seed'] + replica or digest(source) != saved['network_sha256']:
+        if saved['seed'] != seed or digest(source) != saved['network_sha256']:
             raise ValueError(f'Completed network changed: {source}')
         return source
     for name in DEFINITIONS:
         shutil.copy2(Path(project) / 'crosslinking' / name, work / name)
     command = build_command(project, cfg, replica)
-    write_json(work / 'invocation.json', dict(command=command, cwd=str(work), seed=cfg['seed'] + replica))
-    print(f'Replica {replica}: build and crosslink epoxy, seed={cfg["seed"] + replica}', flush=True)
+    write_json(work / 'invocation.json', dict(command=command, cwd=str(work), seed=seed))
+    print(f'Replica {replica}: build and crosslink {cfg.get("chemistry", "epoxy")} network, seed={seed}', flush=True)
     # Inherit the worker's single selected GPU; never share a working directory.
     # The child also holds the replica lock, so an orphaned build still blocks
     # a restart from deleting its output with --force.
@@ -189,16 +219,17 @@ def ensure_network(project, cfg, replica, lock=None):
         raise failure
     settings = json.loads((source.parent / 'settings.json').read_text())
     metrics = json.loads((source.parent / 'metrics.json').read_text())
-    if settings['seed'] != cfg['seed'] + replica:
+    if settings['seed'] != seed:
         raise RuntimeError('crosslinking seed differs from the assigned replica seed')
     data = json.loads(source.read_text())
     if not data.get('graphs') or not data.get('positions'):
         raise RuntimeError('crosslinking did not produce a saved network')
     target = cfg['crosslinking']['target_conversion']
-    record = dict(seed=cfg['seed'] + replica, network_sha256=digest(source),
+    record = dict(seed=seed, network_sha256=digest(source),
         network=str(source.relative_to(project)), atoms=len(data['positions']),
         conversion=metrics['conversion'], target_conversion=target,
         target_reached=target is None or metrics['conversion'] >= target,
+        activation_count=settings.get('activation_count'),
         cycles_completed=metrics['cycles_completed'],
         epoxide_consumption_including_activation=metrics['epoxide_consumption_including_activation'],
         **{key: metrics[key] for key in ('sol_mass_fraction', 'sol_monomers_removed', 'sol_oligomers_removed',

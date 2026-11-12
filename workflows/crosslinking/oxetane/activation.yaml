@@ -1,0 +1,31 @@
+# オキセタン（C-O-C-Cの四員環）の開始点ルール。書式は ../YAML_GUIDE.md を参照。
+# エポキシ版（../activation.yaml）と同じ中性proxy表現で、環の大きさだけが異なる。
+activations:
+  - name: neutral_oxetane_ring_opening_seed
+    # C1-O2-C3-C6の四員環。切断するC1はH2個のCH2（O隣接の炭素）に限定。
+    # 3,3-二置換オキセタン（例: 3-ethyl-3-hydroxymethyloxetane）では両方のα炭素がCH2。
+    target_smarts: "[C;H2:1]1[O;+0;X2:2][C:3][C:6]1"
+    active_atom_map: 2
+    reaction_state_to_assign: cationic_activity
+    required_atom_states: {2: null}
+    # 対象はオキセタン環の数。floor(対象数 * 0.10) 個をseedに従ってランダム選択。
+    selection: fraction
+    fraction: 0.10
+    seed: 31415
+    atoms_to_add:
+      - atom_map: 4
+        element: H
+        position: {relative_to: 1, towards: 2, distance: 1.09}
+      - atom_map: 5
+        element: H
+        position: {relative_to: 2, towards: 1, distance: 0.97}
+    bonds_to_remove: [[1, 2, 1]]
+    bonds_to_add: [[1, 4, 1], [2, 5, 1]]
+    require_explicit_hydrogens: true
+    expected_total_charge_delta: 0
+    expected_atom_state_deltas: {cationic_activity: 1}
+    metadata:
+      representation: neutral_proxy
+      mechanism: effective_initiation
+      ring: oxetane
+      forcefield_assumption: stock_sage_neutral_species_only

@@ -3,6 +3,7 @@ from contextlib import contextmanager
 import ctypes
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -29,6 +30,18 @@ def file_lock(path, *, blocking=True):
             yield handle
         finally:
             fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def configuration_fingerprint(cfg):
+    return hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
+
+
+def check_run_signature(project, cfg):
+    """Refuse to describe results with a project.json edited after the run started."""
+    signature = Path(project) / 'run_signature.json'
+    if signature.exists() and json.loads(signature.read_text())['sha256'] != configuration_fingerprint(cfg):
+        raise ValueError(f'project.json changed after starting: {project}; '
+                         'restore it or create a new project')
 
 
 def die_with_parent():
@@ -109,3 +122,32 @@ def replica_progress(base):
         raise
     else:
         finish_progress(base, 'completed', stage='completed')
+
+
+SEEDS = 'seed_overrides.json'  # not replica_*: that glob means replica directories
+
+
+def seed_overrides(project):
+    """Replica seeds replaced by reseed: {"3": {"seed": ..., "previous": [...], ...}}."""
+    try:
+        return json.loads((Path(project) / SEEDS).read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def replica_seed(project, cfg, replica):
+    """The seed a replica runs with: project seed + replica, unless reseeded.
+
+    Overrides live outside project.json, so reseeding one failed replica does not
+    change the configuration fingerprint the other replicas were started with.
+    """
+    override = seed_overrides(project).get(str(replica))
+    return override['seed'] if override else cfg['seed'] + replica
+
+
+def replica_seeds(project, cfg):
+    return {replica: replica_seed(project, cfg, replica) for replica in range(1, cfg['replicates'] + 1)}
+
+
+def write_seed_overrides(project, overrides):
+    _write(Path(project) / SEEDS, overrides)

@@ -11,10 +11,15 @@ not a set of branch points.
    (a bridge) that lead to no infinite (winding) part, pruned repeatedly.
 3. Active network: the rest. Junctions are its nodes with three or more
    active bonds; strands are the chains of two-bond nodes between them.
-   A strand that returns to its own junction without winding is a loop and
-   is not elastically effective.
+   A strand that returns to its own junction without winding is a loop: it
+   is not elastically effective and its junction loses those two bonds. The
+   junctions are then recounted, repeatedly, so a node left with two bonds
+   becomes part of a chain again.
 
-Densities use the cell volume. M_c = rho N_A / nu_e. The rubbery shear
+Densities use the cell volume. M_c = rho N_A / nu_e counts the whole cell mass
+(sol, dangling and loop material included); Mc_active_network uses only the
+active network. Neither is the mass of one strand between junctions, which is
+strand_molecular_weight_g_mol (interior atoms only). The rubbery shear
 modulus estimates are the affine (nu_e k T) and phantom (xi k T / V,
 xi = strands - junctions) limits; they ignore entanglements and are
 for the rubbery state above Tg.
@@ -29,6 +34,8 @@ import numpy as np
 
 NA = 6.02214076e23
 KB = 1.380649e-23
+# Stored with each result; raise it when the definition of the counts changes.
+METHOD_VERSION = 2
 
 
 def _lifts(nodes, edges, start):
@@ -128,6 +135,26 @@ def _ring_systems(graph, heavy, shift_of):
     return root
 
 
+def _hbond_acceptor(i, atoms, element, neighbors):
+    """Whether a N or O atom accepts hydrogen bonds; follows the Lipinski rules of RDKit
+    except that a pyrrole-type aromatic N never accepts, with or without its H."""
+    def on_multiple_bond(atom):
+        return any(o == 2 and element[k] in (7, 8, 15, 16) for k, o in neighbors[atom])
+    charge = atoms[i].get('formal_charge', 0)
+    if element[i] == 8:
+        # Acid OH donates; its lone pairs are delocalized into the C=O.
+        acid = any(element[j] == 1 for j, _ in neighbors[i]) and any(
+            element[j] != 1 and on_multiple_bond(j) for j, _ in neighbors[i])
+        return charge <= 0 and not acid
+    if charge > 0:
+        return False
+    if atoms[i]['aromatic']:
+        return len(neighbors[i]) == 2
+    # Amide, sulfonamide and similar N: the lone pair is delocalized.
+    return sum(o for _, o in neighbors[i]) == 3 and not any(
+        o == 1 and on_multiple_bond(j) for j, o in neighbors[i])
+
+
 def polar_groups(graphs):
     """Counts of polar and reactive groups from the chemical graph."""
     counts = Counter()
@@ -141,6 +168,7 @@ def polar_groups(graphs):
         rings = RingFinder({i: {j for j, _ in neighbors[i]} for i in range(len(atoms))}).rings_near(
             [i for i in range(len(atoms)) if element[i] != 1])
         epoxide_O = {a for r in rings if len(r) == 3 for a in r if element[a] == 8}
+        oxetane_O = {a for r in rings if len(r) == 4 for a in r if element[a] == 8}
         aromatic_rings = sum(all(atoms[a]['aromatic'] for a in r) for r in rings)
         if aromatic_rings:
             counts['aromatic_rings'] += aromatic_rings
@@ -154,6 +182,8 @@ def polar_groups(graphs):
                     counts['phenolic_OH' if aromatic else 'aliphatic_OH'] += 1
                 elif i in epoxide_O:
                     counts['epoxide_rings'] += 1
+                elif i in oxetane_O:
+                    counts['oxetane_rings'] += 1
                 elif len(heavy) == 2 and all(o == 1 for _, o in heavy):
                     counts['ether_O'] += 1
                 elif len(heavy) == 1 and heavy[0][1] == 2:
@@ -161,7 +191,8 @@ def polar_groups(graphs):
             elif z == 7:
                 counts[f'N_with_{hydrogens}H'] += 1
             if z in (7, 8):
-                counts['hbond_acceptor_atoms'] += 1
+                if _hbond_acceptor(i, atoms, element, neighbors):
+                    counts['hbond_acceptor_atoms'] += 1
                 counts['hbond_donor_H'] += hydrogens
             if atom.get('reaction_state') == 'cationic_activity':
                 counts['active_cationic_sites'] += 1
@@ -183,7 +214,7 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
     masses = np.array([a['mass'] for g in graphs for a in g['atoms']], dtype=float)
     total_mass = masses.sum()
 
-    sol_mass = dangling_mass = active_mass = 0.
+    sol_mass = dangling_mass = active_mass = loop_mass = 0.
     junction_degrees, strand_lengths, strand_masses, backbone_bonds = Counter(), [], [], []
     strands = loops = gel_molecules = 0
     offset = 0
@@ -275,40 +306,51 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
                     leaves.append(other)
         active_nodes = {x for c in alive for x in comps[c]}
         dangling_mass += sum(node_mass[x] for x in members if x not in active_nodes)
-        active_mass += sum(node_mass[x] for x in active_nodes)
         # Strands between junctions of the active graph.
         active = defaultdict(list)
         for k, (a, b, s) in edge_shift.items():
             if a in active_nodes and b in active_nodes:
                 active[a].append((b, k, s)); active[b].append((a, k, -s))
-        junctions = {x for x in active_nodes if len(active[x]) >= 3}
+        # Removing a loop can turn its junction into a chain node, which can close
+        # a new loop, so walk again until none is left. Bridges cannot appear:
+        # a loop touches the rest of the graph at one node only.
+        while True:
+            junctions = {x for x in active_nodes if len(active[x]) >= 3}
+            used, walks = set(), []
+            for start in junctions:
+                for other, k, s in active[start]:
+                    if k in used:
+                        continue
+                    used.add(k)
+                    shift, previous, node, edge_ids, interior = s.copy(), k, other, {k}, []
+                    while node not in junctions:
+                        interior.append(node)
+                        (nxt, k2, s2), = [e for e in active[node] if e[1] != previous]
+                        used.add(k2); edge_ids.add(k2); shift += s2; previous, node = k2, nxt
+                    walks.append((start, node, interior, edge_ids, node == start and not shift.any()))
+            closed = [walk for walk in walks if walk[4]]
+            if not closed:
+                break
+            for start, _, interior, edge_ids, _ in closed:
+                loops += 1
+                loop_mass += sum(node_mass[x] for x in interior)
+                active_nodes.difference_update(interior)
+                active[start] = [e for e in active[start] if e[1] not in edge_ids]
+                if details is not None:
+                    details.append(dict(graph=gi, loop=True, junctions=(members[start], members[start]),
+                                        interior=[members[x] for x in interior]))
+        active_mass += sum(node_mass[x] for x in active_nodes)
         for x in junctions:
             junction_degrees[len(active[x])] += 1
-        used = set()
-        for start in junctions:
-            for other, k, s in active[start]:
-                if k in used:
-                    continue
-                used.add(k)
-                path_mass, path_atoms, shift, previous, node = 0., 0, s.copy(), k, other
-                interior = []
-                while node not in junctions:
-                    path_mass += node_mass[node]; path_atoms += node_size[node]
-                    interior.append(node)
-                    (nxt, k2, s2), = [e for e in active[node] if e[1] != previous]
-                    used.add(k2); shift += s2; previous, node = k2, nxt
-                is_loop = node == start and not shift.any()
-                if details is not None:
-                    details.append(dict(graph=gi, loop=is_loop, junctions=(members[start], members[node]),
-                                        interior=[members[x] for x in interior]))
-                if is_loop:
-                    loops += 1
-                    continue
-                strands += 1
-                strand_lengths.append(path_atoms)
-                strand_masses.append(path_mass)
-                backbone_bonds.append(_backbone_bonds(atom_edges, members[start], members[node],
-                                                      {a for x in interior for a in members[x]}))
+        for start, node, interior, _, _ in walks:
+            if details is not None:
+                details.append(dict(graph=gi, loop=False, junctions=(members[start], members[node]),
+                                    interior=[members[x] for x in interior]))
+            strands += 1
+            strand_lengths.append(sum(node_size[x] for x in interior))
+            strand_masses.append(sum(node_mass[x] for x in interior))
+            backbone_bonds.append(_backbone_bonds(atom_edges, members[start], members[node],
+                                                  {a for x in interior for a in members[x]}))
         # Junction-free active cycles (a chain wrapping the cell by itself).
         for x in active_nodes - junctions:
             for _, k, _ in active[x]:
@@ -339,11 +381,16 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
     per_volume = 1 / NA / volume_m3 / 1000       # count -> mmol/cm^3 (= mol/L)
     return dict(
         definitions='heavy-atom graph, fused 3-8 rings contracted; gel = periodically winding molecules; '
-                    'dangling = pieces behind a bridge with no winding part; junction = active node with >= 3 active bonds',
+                    'dangling = pieces behind a bridge with no winding part; loops are removed before counting; '
+                    'junction = active node with >= 3 active bonds after that; Mc_g_mol = total cell mass / strands; '
+                    'Mc_active_network_g_mol = active network mass / strands; '
+                    'strand_molecular_weight_g_mol = interior atoms of each strand, junction atoms excluded',
+        method_version=METHOD_VERSION,
         volume_nm3=volume_m3 * 1e27, density_g_cm3=density_kg_m3 / 1000,
         gel_molecules=gel_molecules,
         sol_mass_fraction=float(sol_mass / total_mass),
         dangling_mass_fraction=float(dangling_mass / total_mass),
+        loop_mass_fraction=float(loop_mass / total_mass),
         active_mass_fraction=float(active_mass / total_mass),
         junctions=junction_count,
         junction_functionality=dict(sorted((int(k), v) for k, v in junction_degrees.items())),
@@ -355,6 +402,7 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
         junction_density_mmol_cm3=float(junction_count * per_volume),
         cycle_rank_density_mmol_cm3=float(xi / 1000),
         Mc_g_mol=float(density_kg_m3 * 1000 / nu_e) if strands else None,
+        Mc_active_network_g_mol=float(active_mass / strands) if strands else None,
         strand_heavy_atoms=dict(mean=float(lengths.mean()), median=float(np.median(lengths)),
                                 min=int(lengths.min()), max=int(lengths.max())) if strands else None,
         # Strand length: interior heavy atoms between the two junctions, whole ring systems

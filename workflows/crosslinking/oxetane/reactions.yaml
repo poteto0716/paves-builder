@@ -1,0 +1,36 @@
+# オキセタンの成長反応。書式は ../YAML_GUIDE.md を参照。
+# エポキシ版（../reactions.yaml）と同じOH*リレーで、開いた環がC3鎖になる。
+selection: nearest
+seed: 31415
+reactions:
+  - name: oxetane_OH_relay
+    # 0: OH、1: オキセタン。map 1=旧OH酸素、2=攻撃CH2、3=環酸素、4=他方のα炭素、
+    # 6=β炭素（3位）、5=既存H。
+    reactants:
+      - "[O;+0;X2:1]-[#1:5]"
+      - "[C;H2:2]1[O;+0;X2:3][C:4][C:6]1"
+    # O1-H5/C2-O3を切り、O1-C2/O3-H5を作る。結合はO-CH2-C(β)-CH2-OHの向き。
+    products:
+      - "[O;+0:1]-[C:2]-[C:6]-[C:4]-[O;+0:3]-[#1:5]"
+    reactive_atom_maps: [1, 2]
+    required_atom_states:
+      1: cationic_activity
+      3: null
+    product_atom_states:
+      1: null
+      3: cationic_activity
+    require_explicit_hydrogens: true
+    distance_cutoff: 5.0
+    allow_intramolecular: true
+    minimum_graph_separation: 4
+    max_reactions_per_cycle: 1
+    expected_total_charge_delta: 0
+    expected_atom_state_deltas: {cationic_activity: 0}
+    metadata:
+      mechanism: effective_oxetane_OH_relay
+      representation: neutral_proxy
+      active_state: cationic_activity
+      ring: oxetane
+      forcefield_assumption: stock_sage_neutral_species_only
+      # 0始まりでreactants[1]のオキセタン消費をconversionに使う。
+      conversion_reactant: 1

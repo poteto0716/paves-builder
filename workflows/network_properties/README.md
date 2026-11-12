@@ -45,8 +45,32 @@ SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別�
 ゲル化点に達していなければそのレプリカは停止）。
 packing（既定0.5 g/cm³、`--packing-density`。PAVESの局所緩和あり、環を貫通する結合があれば停止）後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
 `--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
-`--epoxy-smiles`、`--total-atoms`、`--target-conversion`、`--cycles`、
+`--smiles`（旧名`--epoxy-smiles`も可）、`--total-atoms`、`--target-conversion`、`--cycles`、
 `--activation-fraction`または`--activation-count`で変更できます。
+
+### エポキシ以外の環（オキセタンなど）
+
+反応点はエポキシに固定されておらず、開始点ルール（`activation.yaml`）の`target_smarts`に
+一致する環を数えます。`--chemistry oxetane`で、オキセタン用のYAML
+（[crosslinking/oxetane/](../crosslinking/oxetane/)、エポキシ版と同じOH*リレーの四員環版）と
+既定モノマーOXT-221（`CCC1(COCC2(CC)COC2)COC1`）を使います。モノマーは`--smiles`で変えられます。
+
+```bash
+python workflows/network_properties/network_properties.py new workflows/network_properties/output/oxetane \
+  --chemistry oxetane --smiles 'CCC1(COCC2(CC)COC2)COC1' --replicates 4 --platform CUDA
+```
+
+ほかの環や反応は`--activation-yaml`／`--reactions-yaml`で渡します。モノマーに`target_smarts`へ
+一致する部位がなければ、開始点0の場合を除いて停止します。
+レポートには未反応の環を`epoxide_rings`（三員環のO）と`oxetane_rings`（四員環のO）で数えます。
+
+### 反応させない（反応率0の単分子）
+
+`--activation-fraction 0`または`--activation-count 0`で、開始点を作らず反応cycleも省きます
+（`project.json`では`cycles: 0`、`target_conversion: null`になります）。
+packing、加圧、1 atmの緩和、最終MDだけを行った未反応モノマーの構造から、同じ熱履歴と物性評価を行います。
+目標反応率は適用されないので、そのレプリカも集計のチェック対象に入ります。
+反応点のない分子（環を持たない液体など）も開始点0なら計算できます。
 反応距離の上限は`--max-reaction-cutoff`（既定7 Å）で変えられます。
 開始距離は`--reaction-cutoff`、距離の固定は`--fixed-reaction-cutoff`です。
 反応後の緩和は`--reaction-minimization-iterations`、`--reaction-minimization-radius`（反応点から何Å以内を最小化するか。既定12、0で系全体）、`--post-reaction-md-steps`、
@@ -109,7 +133,7 @@ GPUが1台なら`--gpus 0`で全レプリカを順番に実行します。
 既存の`CUDA_VISIBLE_DEVICES`で制限されたGPUの範囲を超えて割り当てません。
 内部ではGPU UUIDを使って各ジョブから1台だけを見せるため、物理GPU番号の取り違えを防ぎます。
 
-各レプリカのseedは`project.json`の`seed + replica番号（1始まり）`です。
+各レプリカのseedは`project.json`の`seed + replica番号（1始まり）`です（`reseed`した場合を除く）。
 上の例では31416, 31417, 31418, 31419になります。
 既定では、モノマーpack・開始点の選択・架橋反応・熱緩和・物性評価へこのseedを渡します。
 各レプリカの架橋ネットワークを別々に生成し、構築から溶媒評価までの一連を1ジョブとして実行します。
@@ -120,6 +144,30 @@ GPUが1台なら`--gpus 0`で全レプリカを順番に実行します。
 管理プロセスのログは`jobs/launcher.log`、PIDは`jobs/launcher.json`、
 GPU・seed・ジョブ状態は`jobs/plan.json`と`jobs/status.json`に記録します。
 各レプリカにも`execution.json`を保存します。
+
+### seedを変えて失敗したレプリカだけ再計算する
+
+seedによってはMDが発散するなどしてレプリカが失敗します。失敗したレプリカだけに新しいseedを
+割り当て、そのレプリカだけを最初から計算し直せます。
+
+```bash
+# 新しいseedを確認（何も変更しない）
+python workflows/network_properties/network_properties.py reseed \
+  workflows/network_properties/output/epoxy_gpu --replica 3 --dry-run
+# 失敗したreplica 3とreplica 4に新しいseedを割り当て、そのままGPU 0へ投入
+python workflows/network_properties/network_properties.py reseed \
+  workflows/network_properties/output/epoxy_gpu --replica 3 --replica 4 --submit --gpus 0
+```
+
+新しいseedは`seed + k×レプリカ数 + replica番号`（k = 1, 2, …）のうち、そのprojectでまだ
+使っていない最小の値です（`--seed`で1レプリカに明示も可）。初回のseedや他のレプリカと重なりません。
+旧seedの出力は`failed_attempts/replica_03_seed31418_1/`へ移し（エラーログも含めて保存）、
+レプリカは構築（packing）からやり直します。各段階がseedに依存するため、途中からは再開しません。
+割り当ては`seed_overrides.json`に記録し、`project.json`は変更しません
+（他のレプリカの実行条件の指紋はそのままです）。`status`、`report.md`、`replica_seeds`にも新しいseedが出ます。
+対象は`failed`状態のレプリカだけです。完了済みや、強制終了で状態が残っていないレプリカは`--force`が必要です。
+実行中のレプリカやGPUジョブの投入中は拒否します。`--submit`を付けない場合は、あとで`submit`すれば
+未完了のレプリカとして実行されます。
 
 `status`は各レプリカの現在の計算段階（架橋構築、熱履歴の各温度、NVT、弾性、
 溶媒ごとのpack・挿入自由エネルギー・拡散MD）と経過時間、架橋中なら最新のcycleと反応率、
@@ -171,15 +219,29 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 | 乾燥NVT観測 | 冷却・復帰後の固定セルで1 ns再緩和、10 ns観測 |
 | 独立seed | 既定では架橋構築から独立した4レプリカ。保存構造入力時は共通トポロジー |
 
+熱履歴の終了時に`replica_XX/tg_density_volume.png`を書きます。冷却中の温度–密度・温度–体積（サンプルと10 K平均）、Tgフィット曲線とガラス・ゴム側の漸近線、Tg、昇温各段階の終了時の密度・体積を1枚に描きます。昇温中の点が冷却曲線から大きく外れていれば、高温での沸騰・空洞化を疑ってください（`report`でも既存の結果から作り直し、report.mdに載せます）。
+
 冷却は温度plateauを使う段階冷却です。800 Kにも観測用plateauを置くため、
 冷却区間の合計は既定18 nsです（800→100 Kの温度差に対応する分は17.5 ns）。
 時間は刻み幅とタイムステップに丸め、各段階の`done.json`に実時間を記録します。
-既定タイムステップは0.5 fs。体積制御はwheelのconstraint group座標に対する
+既定タイムステップは1 fs（X–H結合を拘束。熱履歴・300 KのNPT/NVT・溶媒で共通）。
+2026-11-12以前の既定は0.5 fsで、時間（ps）は同じまま刻みを倍にしたので、step数は半分です。
+体積の試行間隔も50 step（50 fs、以前は0.5 fs×100 step）にして同じ頻度に保っています。
+弾性だけはX–H拘束を外し、別に0.25 fsを使います（`timestep_fs`の影響を受けません）。
+体積制御はwheelのconstraint group座標に対する
 周期架橋対応Monte Carlo更新です。一般的な分子単位barostatへの置き換えはしません。
 
 **100 Kまで冷却した後に300 Kへ戻した構造**を、弾性・溶媒評価に使います。
 冷却途中の300 K構造も別名で保存します。再加熱でTgを再評価する設定ではありません。
 800 Kで化学的に分解する場合でも、固定トポロジーMDには分解機構は含まれません。
+
+**未架橋・低反応率の系では高温側を下げてください。** 反応率0のTMP triglycidyl ether（3000原子）では、
+800 K・1 atmで密度が300 Kの0.50倍（1.07→0.54 g/cm³）まで下がり、セル内に半径6 Åを超える空洞が
+できました（沸騰・キャビテーション）。この空隙は冷却後のガラスに残り、Tg/CTEのフィットと300 Kの揺らぎを
+壊します。網目は蒸発できないので、これは単分子・オリゴマーに特有です。
+`new --high-temperature 600`などで最高温度を変えられます（`project.json`の`high_K`）。
+各段階の終了時密度は`dry_result.json`の`thermal_history_density`に記録し、高温緩和後の密度が
+開始時の0.7倍を下回ると`possible_vaporization: true`として、冷却フィットと300 K NPTのチェックを不合格にします。
 
 RadonPyと同じ熱力学的揺らぎ関係を使う出力は次の通りです。
 
@@ -189,7 +251,7 @@ RadonPyと同じ熱力学的揺らぎ関係を使う出力は次の通りです�
 | 定圧比熱Cp | Var(H) / (kB T² m)、J/(kg K) |
 | 等温圧縮率κT | Var(V) / (kB T ⟨V⟩)、1/Pa |
 | 等温bulk modulus KT | 1/κT、GPa |
-| 体積CTE αV | Cov(V,H) / (kB T² ⟨V⟩)、1/K |
+| 体積CTE αV | Cov(V, U+PV) / (kB T² ⟨V⟩)、1/K（= Cov(V,H)/…、Kは体積と無相関） |
 | 線CTE αL | αV / 3（等方性を仮定）、1/K |
 | 定積比熱Cv | Cp − T αV² / (ρ κT)、J/(kg K) |
 | 断熱圧縮率κS | κT Cv / Cp、1/Pa |
@@ -200,7 +262,7 @@ RadonPyと同じ熱力学的揺らぎ関係を使う出力は次の通りです�
 | 幾何補助量 | wheelのpoint-probe空隙率など。溶媒アクセス可能体積とは異なる |
 | ネットワーク形状 | 連結成分、最大成分の質量割合、cycle rank、周期セルを貫く結合cycleの有無 |
 
-Hは`U + K + Pext V`です。比熱は古典・拘束付きSageモデルの値で、量子補正は行いません。
+Hは`U + K + Pext V`です。体積CTEの共分散には配置エンタルピー`U + Pext V`を使います。NPTでは運動量が配置・体積と独立でCov(V, K) = 0のため期待値は同じで、Kを含めると雑音だけが増えます（2026-11-12以前はKを含めていたため、短い観測でCTEが負になりやすかった）。比熱は古典・拘束付きSageモデルの値で、量子補正は行いません。
 5ブロックの誤差、体積・エネルギーの有効サンプル数と前後半drift、
 replica間の標本SDとSEMを出力します。1 replicaだけの場合、replica間誤差はnullです。
 Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、端への張り付き、
@@ -236,7 +298,8 @@ python workflows/network_properties/network_graph.py replica_01/relaxed_300K.str
 - 主鎖の結合数`strand_backbone_bonds_histogram`：架橋点の原子から架橋点の原子までの最短経路の結合数（参考）。
 
 `strand_table`には鎖1本ごとの3つの値が入ります。reportでは各レプリカの`network_strands.csv`（1鎖1行）と
-`network_strands.png`（3つの分布）にも出力します。M_c = ρN_A/ν_eは鎖の本数だけで決まります。
+`network_strands.png`（3つの分布）にも出力します。鎖の平均長・平均分子量、鎖と架橋点の本数は
+レプリカ比較とディレクトリ横断集計にも入ります。
 
 H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系を1つの節点にまとめます
 （鎖の途中の芳香環は通過点で、分岐点とは数えません。周期境界を通って閉じる環は環とみなしません）。
@@ -245,16 +308,43 @@ H原子を除いた重原子グラフで、縮環を含む3〜8員環の環系�
 |---|---|
 | `sol_mass_fraction` | 周期境界をまたいで自分自身の像とつながらない分子（未反応モノマー・オリゴマー）の質量分率 |
 | `dangling_mass_fraction` | ゲルのうち、1本の結合（橋）だけでつながり、その先に無限につながった部分がない部分の質量分率 |
-| `junctions`、`junction_functionality` | 残りの有効網目で、有効な結合を3本以上持つ節点（架橋点）とその官能度の分布 |
-| `effective_strands`、`strand_density_nu_e_*` | 架橋点どうしを結ぶ鎖の数と、その数密度ν_e。同じ架橋点に戻るループ（`elastically_ineffective_loops`）は除外 |
-| `Mc_g_mol` | ρN_A/ν_e |
+| `elastically_ineffective_loops`、`loop_mass_fraction` | 同じ架橋点に戻るループの数と質量分率。ループを除いて架橋点を数え直し、これを繰り返すので、付け根の節点は結合が2本に減れば鎖の一部に戻ります |
+| `active_mass_fraction` | ゾル、ダングリング、ループを除いた有効網目の質量分率 |
+| `junctions`、`junction_functionality` | ループ除去後の有効網目で、有効な結合を3本以上持つ節点（架橋点）とその官能度の分布 |
+| `effective_strands`、`strand_density_nu_e_*` | 架橋点どうしを結ぶ鎖の数と、その数密度ν_e |
+| `Mc_g_mol` | ρN_A/ν_e。実質は「セル内の全質量÷有効鎖本数」の見かけの値で、ゾルなどの質量も含みます |
+| `Mc_active_network_g_mol` | 有効網目の質量÷有効鎖本数。架橋点の原子を含みます |
+| `strand_molecular_weight_g_mol` | 鎖そのものの分子量の統計。架橋点の原子を含みません |
 | `cycle_rank_density_mmol_cm3` | ξ/V（ξ = 鎖の数 − 架橋点の数） |
 | `rubbery_shear_modulus_estimates_MPa` | ゴム状態の弾性率の目安。affine：ν_e kT、phantom：ξkT/V（300 K。からみ合いは含まない） |
-| `polar_groups_*` | 脂肪族／フェノール性OH、エーテルO、未反応エポキシ環、カルボニルO、N（H数別）、芳香環、水素結合の供与H・受容原子、反応活性点（`cationic_activity`）の数・mmol/cm³・mmol/g |
+| `polar_groups_*` | 脂肪族／フェノール性OH、エーテルO、未反応エポキシ環・オキセタン環、カルボニルO、N（H数別）、芳香環、水素結合の供与H・受容原子、反応活性点（`cationic_activity`）の数・mmol/cm³・mmol/g |
 
+水素結合の受容原子はNとOを官能基で判定します（RDKitのLipinski定義に準拠。アミド型N、
+酸のOH、ニトロのN、ピロール型の芳香族Nなどは数えません）。供与は原子ではなくHの本数を数えます。
 OH*の代理表現では、活性な鎖末端もOHとして数えます（`active_cationic_sites`と同数）。
+結果には`method_version`が入り、定義が古い値は比較表に残りますがチェック通過には数えません。
 架橋エポキシはガラス状態なので、ν_eやゴム状態の弾性率はFlory–Rehner式など膨潤理論の入力用の値で、
 300 Kのガラスの弾性率（「弾性」の節）とは別物です。
+
+## OVITOでの可視化
+
+各段階の`state.xml`はOpenMMの状態（座標・速度・セル、nm）だけで、元素・結合・電荷を含みません。
+それらは同じディレクトリの`final.structure.json`（PAVES形式、Å）にあります。
+`to_ovito.py`はこのJSONから、OVITOでそのまま開けるLAMMPS data（atom_style full：元素名の原子タイプ、
+部分電荷、分子番号、結合、セル内へwrapした座標とimage flag）を書きます。
+
+```bash
+# 1構造 -> relaxed_300K.data
+python workflows/network_properties/to_ovito.py replica_01/relaxed_300K.structure.json
+# 元素・結合はJSON、座標とセルはOpenMMのstate.xmlから
+python workflows/network_properties/to_ovito.py replica_01/02_high_equilibration/final.structure.json \
+  --state replica_01/02_high_equilibration/state.xml -o high.data
+# レプリカの全段階：段階ごとの.dataと、段階順の多フレームextended XYZ（セルの変化を含む）
+python workflows/network_properties/to_ovito.py replica_01 --trajectory replica_01/history.xyz
+```
+
+extended XYZには結合が入りません（OVITOのCreate bondsで付けます）。各フレームの段階名は`phase`属性に入ります。
+numpyだけで動くので、OVITOの環境でも実行できます。
 
 ## 弾性
 
@@ -276,7 +366,9 @@ Sageの調和結合項として読み込み（`load_network(..., constrained=Fal
 NPTの拘束付きKTとの違いにはこのモデル差も含みます。
 以前は拘束付きの系から拘束だけを外していたため、X–H結合に結合項がなく（OpenFFは拘束した結合に
 結合項を書きません）、ひずみ0でも約−0.7〜−0.8 GPaの見かけの応力が出ていました。
-2026-10-30以前の弾性結果は使わないでください。
+2026-10-30以前の弾性結果は再利用も集計もされません。`mechanical/provenance.json`の手法バージョン、
+入力構造のハッシュ、ひずみと時間の設定が一致しない結果は`mechanical.stale-N/`へ移して再計算します。
+wheelの更新は自動では検出しません。応力が変わる変更では`mechanical.py`の`METHOD_VERSION`を上げてください。
 
 弾性は、ひずみ幅、応力の標本誤差、セル長依存の
 比較が必要なため、自動収束フラグを常にfalseにしています。
@@ -315,6 +407,8 @@ NPTの拘束付きKTとの違いにはこのモデル差も含みます。
 
 ```text
 project.json / run_signature.json
+seed_overrides.json                 # reseedしたレプリカの新しいseedと履歴
+failed_attempts/                    # reseed前の失敗した試行（レプリカとしては集計しない）
 crosslinking/                       # 既定モード：コピーした反応・開始点ルール
 input.structure.json               # --networkモードのみ：共通入力構造
 summary.json / report.md
@@ -341,8 +435,10 @@ replica_01/
 ```
 
 同じ`run`コマンドで再開します。熱履歴は完了済みの温度・段階のstateから戻し、
-中断した段階を初めから実行します。弾性は完了した正負分岐を
-再利用します。溶媒MD・自由エネルギーはwheelのcheckpointから再開します。
+中断した段階を初めから実行します。弾性は手法と入力が同じ場合に限り、完了した正負分岐を
+再利用します。launcherが強制終了するとワーカーも止まり、まだ動いているレプリカがあれば`submit`は拒否します。
+`report`と`collect`は、実行開始後に`project.json`を変更したプロジェクトを集計しません。
+溶媒MD・自由エネルギーはwheelのcheckpointから再開します。
 熱履歴の再開はOpenMMの乱数状態まで一致する厳密再現ではありません。
 `--network`で共通構造を入力した場合は、異なる架橋トポロジーによるばらつきを含みません。
 

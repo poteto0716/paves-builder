@@ -45,6 +45,30 @@ class EpoxyPipelineTests(unittest.TestCase):
         self.assertTrue(cfg['crosslinking']['remove_sol_fraction'])
         self.assertIn('--remove-sol-fraction',build_command(trimmed,cfg,1))
 
+    def test_zero_starts_and_oxetane_preset(self):
+        monomer=Path(self.temp.name)/'monomer'
+        self.assertEqual(main(['new',str(monomer),'--platform','CPU','--activation-fraction','0']),0)
+        cfg=json.loads((monomer/'project.json').read_text())
+        self.assertEqual(cfg['crosslinking']['activation_fraction'],0)
+        self.assertEqual(cfg['crosslinking']['cycles'],0)
+        self.assertIsNone(cfg['crosslinking']['target_conversion'])
+        command=build_command(monomer,cfg,1)
+        self.assertEqual(command[command.index('--activation-fraction')+1],'0.0')
+        self.assertIn('fraction: 0.0',(monomer/'crosslinking/activation.yaml').read_text())
+        oxetane=Path(self.temp.name)/'oxetane'
+        self.assertEqual(main(['new',str(oxetane),'--platform','CPU','--chemistry','oxetane']),0)
+        cfg=json.loads((oxetane/'project.json').read_text())
+        self.assertEqual(cfg['chemistry'],'oxetane')
+        self.assertEqual(cfg['crosslinking']['smiles'],'CCC1(COCC2(CC)COC2)COC1')
+        self.assertIn('oxetane_OH_relay',(oxetane/'crosslinking/reactions.yaml').read_text())
+        own=Path(self.temp.name)/'own'
+        self.assertEqual(main(['new',str(own),'--platform','CPU','--chemistry','oxetane',
+                               '--smiles','CCC1(CO)COC1']),0)
+        self.assertEqual(json.loads((own/'project.json').read_text())['crosslinking']['smiles'],'CCC1(CO)COC1')
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(main(['new',str(Path(self.temp.name)/'bad'),'--network',
+                                   str(self.project/'project.json'),'--chemistry','oxetane']),1)
+
     def fake_popen(self, command, cwd, *, stderr_lines=(), returncode=0, **options):
         if not returncode:
             self.write_build(command, cwd)

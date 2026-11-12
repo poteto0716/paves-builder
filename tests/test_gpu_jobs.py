@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -68,6 +69,58 @@ class GPUJobTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'already running'):
                 jobs.submit(args)
         start.assert_not_called()
+
+    def test_submit_refuses_while_a_replica_lock_is_held(self):
+        args = Namespace(project=self.project,gpus='0,2',dry_run=False)
+        with file_lock(self.project/'replica_02/.run.lock'), \
+             patch.object(jobs,'visible_gpus',return_value=self.devices), \
+             patch.object(jobs.subprocess,'Popen') as start:
+            with self.assertRaisesRegex(RuntimeError,r'Replicas \[2\]'):
+                jobs.submit(args)
+        start.assert_not_called()
+
+    def test_worker_stops_when_the_launcher_is_killed(self):
+        script = '''import json,sys,time
+from pathlib import Path
+Path(sys.argv[2]).write_text(sys.argv[1])
+time.sleep(60)
+'''
+        plan = jobs.plan(self.project,self.cfg,self.devices[:1])
+        path = self.project/'submission.json'
+        path.write_text(json.dumps(plan))
+        started = self.project/'worker_started'
+        launcher = '''import sys
+from workflows.network_properties import gpu_jobs as jobs
+worker = [sys.executable,'-c',sys.argv[2],'x',sys.argv[3]]
+jobs.dispatch(sys.argv[1],command_factory=lambda p,r:worker,poll_interval=.01,refresh_report=False)
+'''
+        process = subprocess.Popen([sys.executable,'-c',launcher,str(path),script,str(started)],
+                                   cwd=jobs.ROOT,env=dict(os.environ,PYTHONPATH=str(jobs.ROOT)))
+        try:
+            deadline = time.time()+20
+            while not started.exists() and time.time() < deadline:
+                time.sleep(.01)
+            self.assertTrue(started.exists())
+            pid = json.loads((self.project/'jobs/status.json').read_text())['jobs'][0]['pid']
+        finally:
+            process.kill()
+            process.wait()
+        deadline = time.time()+10
+        while jobs.process_state(pid) not in (None,'Z') and time.time() < deadline:
+            time.sleep(.01)
+        self.assertIn(jobs.process_state(pid),(None,'Z'))
+
+    def test_refused_duplicate_does_not_mark_a_live_replica_failed(self):
+        from workflows.network_properties.execution import read_progress, set_stage
+        base = self.project/'replica_01'
+        with redirect_stdout(io.StringIO()):
+            set_stage(base,'running elsewhere')
+        job = dict(replica=1,error='refused')
+        with file_lock(base/'.run.lock'):
+            jobs.mark_interrupted(self.project,job)
+            self.assertEqual(read_progress(base)['state'],'running')
+        jobs.mark_interrupted(self.project,job)
+        self.assertEqual(read_progress(base)['state'],'failed')
 
     def command(self, fail_replica=None):
         # An exclusive marker detects accidental overlap of workers on the same GPU.
@@ -177,6 +230,49 @@ raise SystemExit(7 if replica==fail else 0)
         (self.project/'replica_02/dry_result.json').write_text('{}')
         plan=jobs.plan(self.project,self.cfg,self.devices)
         self.assertEqual([j['state'] for j in plan['jobs']],['queued','completed','queued'])
+
+    def test_reseed_archives_only_the_failed_replica_and_routes_its_new_seed(self):
+        from workflows.network_properties.execution import finish_progress, replica_seed, set_stage
+        base=self.project/'replica_02'
+        with redirect_stdout(io.StringIO()):
+            set_stage(base,'thermal history: 02_high_equilibration')
+        finish_progress(base,'failed',error='OpenMMException: Particle coordinate is NaN')
+        (base/'dry_marker').write_text('old')
+        (self.project/'jobs').mkdir()
+        (self.project/'jobs/replica_02.error.log').write_text('trace')
+        args=lambda **k: Namespace(project=self.project,replica=[2],seed=None,force=False,submit=False,
+                                   gpus=None,dry_run=False,**k)
+        with redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError,'has not failed'):
+                jobs.reseed(Namespace(**{**vars(args()),'replica':[1]}))
+            jobs.reseed(args())
+        # base seed 100, 3 replicas: first attempts 101..103, the retry of replica 2 is 100+3+2.
+        self.assertEqual(replica_seed(self.project,self.cfg,2),105)
+        self.assertEqual(replica_seed(self.project,self.cfg,1),101)
+        archive=self.project/'failed_attempts/replica_02_seed102_1'
+        self.assertEqual((archive/'dry_marker').read_text(),'old')
+        self.assertTrue((archive/'job.error.log').is_file())
+        self.assertFalse(base.exists())
+        self.assertEqual([j['seed'] for j in jobs.plan(self.project,self.cfg,self.devices)['jobs']],[101,105,103])
+        with patch('workflows.network_properties.network_properties.initialize_project',return_value=self.cfg), \
+             patch('workflows.network_properties.network_properties.dry_properties'), \
+             patch('workflows.network_properties.network_properties.report'):
+            run(Namespace(project=self.project,replica=2,defer_report=True))
+        self.assertEqual(json.loads((base/'execution.json').read_text())['seed'],105)
+        # The archive is not a replica directory and is never collected as one.
+        self.assertEqual(list(self.project.glob('replica_*/dry_marker')),[])
+        self.assertTrue(all(p.is_dir() for p in self.project.glob('replica_*')))
+        # A second failure gets yet another unused seed; an explicit used seed is refused.
+        with redirect_stdout(io.StringIO()):
+            finish_progress(base,'failed',error='again')
+            with self.assertRaisesRegex(ValueError,'already used'):
+                jobs.reseed(Namespace(**{**vars(args()),'seed':102}))
+            jobs.reseed(args())
+        self.assertEqual(replica_seed(self.project,self.cfg,2),108)
+        self.assertTrue((self.project/'failed_attempts/replica_02_seed105_1').is_dir())
+        with file_lock(self.project/'replica_03/.run.lock'), redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(RuntimeError,'running'):
+                jobs.reseed(Namespace(**{**vars(args()),'replica':[3],'force':True}))
 
     def test_changed_configuration_fails_before_starting_any_worker(self):
         plan=jobs.plan(self.project,self.cfg,self.devices)

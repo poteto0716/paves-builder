@@ -11,6 +11,8 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.replica_summary import collect, write_tables, markdown
+from workflows.network_properties.mechanical import input_identity
+from workflows.network_properties.network_graph import METHOD_VERSION
 from workflows.network_properties.network_properties import report
 
 
@@ -57,7 +59,9 @@ class ReplicaSummaryTests(unittest.TestCase):
     def test_independent_stages_and_tensor_components(self):
         self.dry('replica_01',2.,True)
         tensor = [[float(10*i+j) for j in range(6)] for i in range(6)]
+        self.put('replica_03/relaxed_300K.structure.json',{})
         self.put('replica_03/mechanical/result.json',dict(
+            input_identity(self.project/'replica_03'),
             isotropic=dict(stable=True, young_Hill_GPa=8.),
             symmetric_stiffness_GPa=tensor, sampling_checks_passed=False))
         _, values = collect(self.project,self.cfg)
@@ -67,6 +71,31 @@ class ReplicaSummaryTests(unittest.TestCase):
         self.assertIsNone(young['std'])
         self.assertEqual(values['mechanical.C_xx_yy_GPa']['mean'],1.)
         self.assertFalse(any(key.startswith('transport.') for key in values))
+
+    def test_elastic_result_from_older_method_or_structure_is_not_collected(self):
+        self.put('replica_03/relaxed_300K.structure.json',{})
+        self.put('replica_03/mechanical/result.json',dict(isotropic=dict(stable=True, young_Hill_GPa=8.)))
+        _, values = collect(self.project,self.cfg)
+        self.assertIsNone(values['mechanical.young_Hill_GPa']['replicas']['replica_03']['value'])
+        self.put('replica_03/mechanical/result.json',dict(input_identity(self.project/'replica_03'),
+            isotropic=dict(stable=True, young_Hill_GPa=8.)))
+        self.put('replica_03/relaxed_300K.structure.json',dict(changed=True))
+        _, values = collect(self.project,self.cfg)
+        self.assertIsNone(values['mechanical.young_Hill_GPa']['replicas']['replica_03']['value'])
+
+    def test_network_strand_statistics_are_collected_and_old_definitions_are_unchecked(self):
+        network = dict(method_version=METHOD_VERSION, effective_strands=24, junctions=8, Mc_active_network_g_mol=28.,
+                       strand_molecular_weight_g_mol=dict(mean=24.), strand_heavy_atoms=dict(mean=2.),
+                       strand_backbone_bonds=dict(mean=3.))
+        self.put('replica_01/dry_result.json',dict(network=network))
+        self.put('replica_03/dry_result.json',dict(network=dict(network,method_version=1)))
+        _, values = collect(self.project,self.cfg)
+        for key,value in (('effective_strands',24.),('junctions',8.),('Mc_active_network_g_mol',28.),
+                          ('strand_molecular_weight_g_mol.mean',24.),('strand_heavy_atoms.mean',2.),
+                          ('strand_backbone_bonds.mean',3.)):
+            entry = values['network.'+key]
+            self.assertEqual(entry['mean'],value)
+            self.assertEqual((entry['n_available'],entry['n_checks_passed']),(2,1))
 
     def test_partial_solvent_results_and_undefined_diffusion_are_preserved(self):
         self.put('replica_01/solvents/water/infinite_dilution_free_energy/result.json',dict(

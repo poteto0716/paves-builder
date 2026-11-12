@@ -6,11 +6,17 @@ Full potential energy differences include PME.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
+import shutil
 import numpy as np
 
 CONVERSION_GPA = .0016605390671738467  # kJ mol^-1 nm^-3 -> GPa
 VOIGT = ('xx', 'yy', 'zz', 'yz', 'xz', 'xy')
+# Stored with each result; raise it when a change alters the computed stress.
+# 2: X-H bonds as harmonic terms (2026-10-30).
+METHOD_VERSION = 2
 
 
 def bases():
@@ -101,6 +107,35 @@ def isotropic_moduli(stiffness):
         poisson_Hill=float((3*k-2*g)/(2*(3*k+g))))
 
 
+def input_identity(base):
+    """What a stored result must match to be reused, apart from its sampling settings."""
+    structure = Path(base) / 'relaxed_300K.structure.json'
+    return dict(method_version=METHOD_VERSION, input_sha256=hashlib.sha256(structure.read_bytes()).hexdigest())
+
+
+def result_current(base):
+    """Whether mechanical/result.json came from this method and this relaxed structure."""
+    try:
+        result = json.loads((Path(base) / 'mechanical/result.json').read_text())
+        return all(result.get(k) == v for k, v in input_identity(base).items())
+    except (OSError, ValueError):
+        return False
+
+
+def _retire_stale(directory, provenance):
+    """Move results from another method, structure or setting aside; never reuse or delete them."""
+    path = directory / 'provenance.json'
+    stored = json.loads(path.read_text()) if path.is_file() else None
+    if stored == provenance or not any(directory.iterdir()):
+        return
+    index = 1
+    while (retired := directory.with_name(f'{directory.name}.stale-{index}')).exists():
+        index += 1
+    shutil.move(directory, retired)
+    directory.mkdir()
+    print(f'Elastic results do not match the current method or input; moved to {retired}', flush=True)
+
+
 def run_mechanical(base, cfg, seed):
     import openmm as mm
     from openmm import unit
@@ -108,9 +143,6 @@ def run_mechanical(base, cfg, seed):
     from workflows.network_properties.network_properties import write_json, write_csv
     directory = Path(base) / 'mechanical'
     directory.mkdir(exist_ok=True)
-    if (directory / 'result.json').exists():
-        return
-    host = load_network(Path(base) / 'relaxed_300K.structure.json', constrained=False)
     strain = cfg.get('elastic_strain', .01)
     if not 0 < strain < .03:
         raise ValueError('elastic_strain must lie between 0 and 0.03')
@@ -118,13 +150,20 @@ def run_mechanical(base, cfg, seed):
     equil_ps = .001 if cfg['smoke'] else cfg.get('elastic_equilibration_ps', 200.)
     production_ps = .004 if cfg['smoke'] else cfg.get('elastic_production_ps', 1000.)
     interval_ps = cfg['sample_interval_ps']
+    identity = input_identity(base)
+    provenance = dict(identity, strain=strain, equilibration_ps=equil_ps, production_ps=production_ps,
+                      sample_interval_ps=interval_ps, platform=cfg['platform'], seed=seed)
+    _retire_stale(directory, provenance)
+    write_json(directory / 'provenance.json', provenance)
+    if (directory / 'result.json').exists():
+        return
+    host = load_network(Path(base) / 'relaxed_300K.structure.json', constrained=False)
     means, sems = {}, {}
     for column, basis in enumerate(bases()):
         for sign in (-1,1):
             name = f'{VOIGT[column]}_{"plus" if sign > 0 else "minus"}'
             path = directory / f'{name}.json'
             if path.exists():
-                import json
                 rows = json.loads(path.read_text())
             else:
                 print(f'Elastic response {name}, strain={sign*strain:g}', flush=True)
@@ -150,7 +189,7 @@ def run_mechanical(base, cfg, seed):
     c = np.column_stack([(means[i,1]-means[i,-1])/(2*strain) for i in range(6)])
     errors = np.column_stack([np.sqrt(sems[i,1]**2+sems[i,-1]**2)/(2*strain) for i in range(6)])
     symmetric = (c+c.T)/2
-    write_json(directory / 'result.json', dict(smoke=cfg['smoke'], temperature_K=300.,
+    write_json(directory / 'result.json', dict(identity, smoke=cfg['smoke'], temperature_K=300.,
         voigt_order=list(VOIGT), engineering_shear=True, strain=strain,
         stiffness_GPa=c, symmetric_stiffness_GPa=symmetric, block_sem_GPa=errors,
         asymmetry_relative=float(np.linalg.norm(c-c.T)/max(np.linalg.norm(c),1e-20)),

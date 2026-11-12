@@ -81,6 +81,34 @@ class CrosslinkingDefaultsTests(unittest.TestCase):
             self.workflow.plan_size(20000, 47, 3, added_per_site=2, fraction=.1, mode='invalid')
 
 
+    def test_zero_starts_plan_an_unreacted_monomer(self):
+        for selection in ({'count': 0}, {'fraction': 0.}):
+            with self.subTest(selection=selection):
+                plan = self.workflow.plan_size(20000, 47, 3, added_per_site=2, **selection)
+                self.assertEqual(plan['activation_count'], 0)
+                self.assertEqual(plan['actual_total_atoms'], 47 * plan['monomers'])
+        # A molecule without the target ring is valid only without starts.
+        self.assertEqual(self.workflow.plan_size(500, 20, 0, added_per_site=2, count=0)['activation_count'], 0)
+        with self.assertRaises(ValueError):
+            self.workflow.plan_size(500, 20, 0, added_per_site=2, count=1)
+        with self.assertRaises(ValueError):
+            self.workflow.plan_size(500, 47, 3, added_per_site=2, fraction=-.1)
+
+    def test_oxetane_preset_matches_its_ring_only(self):
+        import yaml
+        from rdkit import Chem
+        root = ROOT / 'workflows/crosslinking'
+        oxetane = Chem.AddHs(Chem.MolFromSmiles('CCC1(COCC2(CC)COC2)COC1'))
+        epoxy = Chem.AddHs(Chem.MolFromSmiles(self.workflow.DEFAULT_SMILES))
+        for directory, molecule, other, sites in ((root / 'oxetane', oxetane, epoxy, 2), (root, epoxy, oxetane, 3)):
+            activation = yaml.safe_load((directory / 'activation.yaml').read_text())['activations'][0]
+            reaction = yaml.safe_load((directory / 'reactions.yaml').read_text())['reactions'][0]
+            for smarts in (activation['target_smarts'], reaction['reactants'][1]):
+                pattern = Chem.MolFromSmarts(smarts)
+                self.assertEqual(len(molecule.GetSubstructMatches(pattern)), sites, smarts)
+                self.assertEqual(len(other.GetSubstructMatches(pattern)), 0, smarts)
+
+
 class PublicReactiveWorkflows(unittest.TestCase):
     def test_installed_implementation_is_compiled(self):
         for module in ('polypaves.api', 'polypaves.reaction.rule', 'polypaves.reaction.local_sage',

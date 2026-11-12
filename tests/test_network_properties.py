@@ -1,6 +1,8 @@
 """Unit/physics checks; installed-wheel integration is opt-in."""
+import contextlib
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -15,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.analysis import thermodynamics, analyze_npt, analyze_nvt, aggregate, topology, KB, NA, DA
 from workflows.network_properties.mechanical import isotropic_moduli, stress, context_for, CONVERSION_GPA
-from workflows.network_properties.network_properties import DEFAULTS, temperature_grid, validate
+from workflows.network_properties.network_properties import DEFAULTS, main, report, temperature_grid, validate
 
 
 class ThermodynamicsTests(unittest.TestCase):
@@ -39,6 +42,23 @@ class ThermodynamicsTests(unittest.TestCase):
         self.assertAlmostEqual(result['Cv_J_kg_K'], cp-300*alpha**2/(rho*kappa))
         self.assertAlmostEqual(result['bulk_modulus_isentropic_GPa'],
                                result['bulk_modulus_isothermal_GPa']*cp/result['Cv_J_kg_K'])
+
+    def test_kinetic_energy_does_not_enter_the_expansion_covariance(self):
+        # K fluctuates but is independent of V: alpha must not move, Cp must include it.
+        a = np.tile([-1., -1., 1., 1.], 100)
+        c = np.tile([1., -1., -1., 1.], 100)  # orthogonal to a, so Cov(V, K) is exactly zero in total
+        rows = [dict(volume_nm3=10.+x*.01, potential_kJ_mol=1000.+x*5., kinetic_kJ_mol=0.) for x in a]
+        noisy = [dict(r, kinetic_kJ_mol=500.+k*50.) for r, k in zip(rows, c)]
+        rng = np.random.default_rng(1)
+        sample = rng.choice(len(rows), 40, replace=False)
+        base, with_k = thermodynamics(rows, 10000, 300, 1.), thermodynamics(noisy, 10000, 300, 1.)
+        self.assertAlmostEqual(with_k['alpha_volume_1_K'], base['alpha_volume_1_K'])
+        self.assertGreater(with_k['Cp_J_kg_K'], base['Cp_J_kg_K'])
+        # On a subsample where V and K happen to correlate, alpha still ignores K.
+        sub = [rows[i] for i in sample]
+        sub_k = [noisy[i] for i in sample]
+        self.assertAlmostEqual(thermodynamics(sub_k, 10000, 300, 1.)['alpha_volume_1_K'],
+                               thermodynamics(sub, 10000, 300, 1.)['alpha_volume_1_K'])
 
     def test_no_volume_fluctuation_does_not_report_infinite_modulus(self):
         rows = [dict(volume_nm3=10., potential_kJ_mol=float(i), kinetic_kJ_mol=1.) for i in range(20)]
@@ -67,6 +87,28 @@ class ThermodynamicsTests(unittest.TestCase):
     def test_replica_singleton_has_no_spurious_zero_uncertainty(self):
         self.assertIsNone(aggregate([{'K':2.}])['K']['sem'])
         self.assertAlmostEqual(aggregate([{'K':1.},{'K':3.}])['K']['std'], np.sqrt(2))
+
+
+class TgFigureTests(unittest.TestCase):
+    def test_tg_figure_with_heating_history_and_without_a_fit(self):
+        import csv
+        from workflows.thermomechanical.analysis import fit_tg, smooth_hyperbola
+        from workflows.network_properties.plots import plot_tg
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            rows = [dict(target_temperature_K=t, volume_nm3=40/d, density_g_cm3=d)
+                    for t in np.arange(800, 99, -20.) for d in [smooth_hyperbola(t, 1.15, 420., -2.5e-4, -4e-4, 20.)]]
+            with (base/'cooling.csv').open('w', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+                writer.writeheader()
+                writer.writerows(rows)
+            fit = fit_tg([r['target_temperature_K'] for r in rows], [r['density_g_cm3'] for r in rows])
+            history = dict(phases=[dict(phase='01_heat_000', temperature_K=400., final_density_g_cm3=1.1)])
+            path = plot_tg(base, dict(cooling=fit, thermal_history_density=history, smoke=False))
+            self.assertEqual(path, base/'tg_density_volume.png')
+            self.assertGreater(path.stat().st_size, 10000)
+            self.assertTrue(plot_tg(base, dict(cooling=dict(reason='too few bins'), smoke=True),
+                                    path=base/'none.png').is_file())
 
 
 class MechanicalTests(unittest.TestCase):
@@ -167,15 +209,17 @@ class NetworkGraphTests(unittest.TestCase):
         r = network_structure(graphs, xyz, box, temperature_K=300.)
         total = 76
         self.assertEqual(r['gel_molecules'], 1)
-        self.assertEqual(r['junction_functionality'], {6: 7, 8: 1})
+        self.assertEqual(r['junction_functionality'], {6: 8})
         self.assertEqual((r['effective_strands'], r['elastically_ineffective_loops']), (24, 1))
         self.assertAlmostEqual(r['sol_mass_fraction'], 2 / total)
         self.assertAlmostEqual(r['dangling_mass_fraction'], 9 / total)
-        self.assertAlmostEqual(r['active_mass_fraction'], 65 / total)
+        self.assertAlmostEqual(r['loop_mass_fraction'], 9 / total)
+        self.assertAlmostEqual(r['active_mass_fraction'], 56 / total)
         volume_m3 = 216e-27
         self.assertAlmostEqual(r['strand_density_nu_e_mol_m3'], 24 / NA / volume_m3)
         self.assertAlmostEqual(r['cycle_rank_density_mmol_cm3'], (24 - 8) / NA / volume_m3 / 1000)
         self.assertAlmostEqual(r['Mc_g_mol'], total * 12. / 24)
+        self.assertAlmostEqual(r['Mc_active_network_g_mol'], 56 * 12. / 24)
         self.assertAlmostEqual(r['rubbery_shear_modulus_estimates_MPa']['affine'],
                                24 / volume_m3 * KB * 300 / 1e6)
         self.assertEqual(r['polar_groups_count']['aromatic_rings'], 1)
@@ -184,6 +228,39 @@ class NetworkGraphTests(unittest.TestCase):
         self.assertEqual(r['strand_backbone_bonds_histogram'], {3: 24})
         self.assertEqual(r['strand_molecular_weight_histogram'], {0: 24})  # 2 x 12 g/mol
         self.assertEqual(r['strand_table']['rows'], [[2, 24.0, 3]] * 24)
+
+    def with_loop(self, graphs, xyz, at):
+        """Copy of the lattice with a 9-atom loop closing on atom at of the network."""
+        network = dict(atoms=list(graphs[0]['atoms']), bonds=list(graphs[0]['bonds']))
+        first = len(network['atoms'])
+        network['atoms'] += [dict(atomic_number=6, mass=12., aromatic=False)] * 9
+        network['bonds'] += [[at, first, 1], [first + 8, at, 1]] + [[first + m, first + m + 1, 1] for m in range(8)]
+        added = [(xyz[at] + (.05 * (m + 1), .05, .05)) % 6 for m in range(9)]
+        return [network] + graphs[1:], np.vstack([xyz[:first], added, xyz[first:]])
+
+    def test_loops_do_not_change_strands_or_junctions(self):
+        from workflows.network_properties.network_graph import network_structure
+        graphs, xyz, box = self.lattice()
+        base = network_structure(graphs, xyz, box)
+        # Atom 8 is inside a strand; atom 60 is inside the loop already on the lattice,
+        # which closes a second loop only after the first one is removed.
+        for at, loops in ((8, 2), (60, 2)):
+            with self.subTest(at=at):
+                r = network_structure(*self.with_loop(graphs, xyz, at), box)
+                self.assertEqual((r['effective_strands'], r['junctions'], r['elastically_ineffective_loops']),
+                                 (24, 8, loops))
+                self.assertEqual(r['junction_functionality'], {6: 8})
+                self.assertEqual(r['strand_table']['rows'], base['strand_table']['rows'])
+                self.assertEqual(r['rubbery_shear_modulus_estimates_MPa'], base['rubbery_shear_modulus_estimates_MPa'])
+
+    def test_mc_definitions_differ_by_which_mass_they_count(self):
+        from workflows.network_properties.network_graph import network_structure
+        graphs, xyz, box = self.lattice()
+        sol = [dict(atoms=[dict(atomic_number=6, mass=12., aromatic=False)], bonds=[]) for _ in range(1000)]
+        r = network_structure(graphs + sol, np.vstack([xyz, np.tile([[4.5, 1.5, 1.5]], (1000, 1))]), box)
+        self.assertAlmostEqual(r['Mc_g_mol'], 538.)
+        self.assertAlmostEqual(r['Mc_active_network_g_mol'], 28.)
+        self.assertAlmostEqual(r['strand_molecular_weight_g_mol']['mean'], 24.)
 
     def test_finite_molecules_are_sol(self):
         from workflows.network_properties.network_graph import network_structure
@@ -206,8 +283,106 @@ class NetworkGraphTests(unittest.TestCase):
         self.assertEqual(counts, dict(aliphatic_OH=1, ether_O=1, epoxide_rings=1, carbonyl_O=1,
                                       hbond_acceptor_atoms=4, hbond_donor_H=1))
 
+    def test_hbond_acceptors_depend_on_the_functional_group(self):
+        from workflows.network_properties.network_graph import polar_groups
+        def acceptors(elements, hydrogens, bonds, aromatic=(), charges=None):
+            atoms = [dict(atomic_number=z, aromatic=i in aromatic, formal_charge=(charges or {}).get(i, 0))
+                     for i, z in enumerate(elements)]
+            atoms += [dict(atomic_number=1, aromatic=False, formal_charge=0)] * len(hydrogens)
+            graph = dict(atoms=atoms, bonds=bonds + [[p, len(elements) + n, 1] for n, p in enumerate(hydrogens)])
+            return polar_groups([graph]).get('hbond_acceptor_atoms', 0)
+        ring = [[m, (m + 1) % 5, 4] for m in range(5)]
+        self.assertEqual(acceptors([6, 6, 7, 8], [0, 0, 0, 2, 2], [[0, 1, 1], [1, 2, 1], [1, 3, 2]]), 1)  # acetamide
+        self.assertEqual(acceptors([6, 6, 8, 8], [0, 0, 0, 3], [[0, 1, 1], [1, 2, 2], [1, 3, 1]]), 1)  # acetic acid
+        self.assertEqual(acceptors([6, 7, 8, 8], [0, 0, 0], [[0, 1, 1], [1, 2, 2], [1, 3, 1]], charges={1: 1, 3: -1}), 2)  # nitro
+        self.assertEqual(acceptors([6, 7, 6, 6], [], [[0, 1, 1], [1, 2, 1], [1, 3, 1]]), 1)  # tertiary amine
+        self.assertEqual(acceptors([7, 6, 6, 6, 6], [0], ring, aromatic=range(5)), 0)  # pyrrole
+
+
+class ElasticReuseTests(unittest.TestCase):
+    CFG = dict(platform='CPU', smoke=False, sample_interval_ps=1.)
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name)
+        (self.base/'relaxed_300K.structure.json').write_text('{}')
+        self.directory = self.base/'mechanical'
+        self.directory.mkdir()
+
+    def branches(self):
+        from workflows.network_properties.mechanical import VOIGT
+        for name in VOIGT:
+            for sign in ('plus', 'minus'):
+                (self.directory/f'{name}_{sign}.json').write_text(json.dumps(
+                    [dict(time_ps=i, **dict.fromkeys(VOIGT, .1 * i)) for i in range(5)]))
+
+    def run_with_md(self):
+        """run_mechanical with MD replaced; True when it had to start MD."""
+        from workflows.network_properties import mechanical as m
+        class Started(Exception):
+            pass
+        with patch('polypaves.sorption.load_network', return_value=object()), \
+             patch.object(m, 'context_for', side_effect=Started), contextlib.redirect_stdout(io.StringIO()):
+            try:
+                m.run_mechanical(self.base, self.CFG, 1)
+            except Started:
+                return True
+        return False
+
+    def test_results_without_provenance_are_retired_and_recomputed(self):
+        (self.directory/'result.json').write_text(json.dumps(dict(old=True)))
+        self.branches()
+        self.assertTrue(self.run_with_md())
+        retired = self.base/'mechanical.stale-1'
+        self.assertEqual(json.loads((retired/'result.json').read_text()), dict(old=True))
+        self.assertTrue((retired/'xx_plus.json').is_file())
+        self.assertFalse((self.directory/'xx_plus.json').exists())
+
+    def test_branches_of_the_same_method_and_input_are_reused(self):
+        self.assertTrue(self.run_with_md())
+        self.branches()
+        self.assertFalse(self.run_with_md())
+        from workflows.network_properties.mechanical import result_current
+        self.assertTrue(result_current(self.base))
+        (self.base/'relaxed_300K.structure.json').write_text('{"changed": 1}')
+        self.assertFalse(result_current(self.base))
+        self.assertTrue(self.run_with_md())
+        self.assertTrue((self.base/'mechanical.stale-1/result.json').is_file())
+
 
 class ConfigurationTests(unittest.TestCase):
+    def test_long_relaxation_stages_json_is_not_taken_for_a_file_name(self):
+        from workflows.crosslinking.crosslinking import load_relaxation_stages
+        stages = [dict(ensemble='NVT', steps=10000 + i, timestep=.1) for i in range(10)]
+        self.assertEqual(load_relaxation_stages(json.dumps(stages)), stages)
+
+    def test_network_input_refuses_sol_removal(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stderr(io.StringIO()) as error:
+            source = Path(temporary)/'source.json'
+            source.write_text(json.dumps(dict(graphs=[dict(atoms=[{'partial_charge':0.}])], positions=[[0,0,0]],
+                                              box_vectors=[[3,0,0],[0,3,0],[0,0,3]])))
+            self.assertEqual(main(['new', str(Path(temporary)/'p'), '--network', str(source),
+                                   '--remove-sol-fraction']), 1)
+        self.assertIn('--network cannot be combined', error.getvalue())
+
+    def test_report_and_collect_refuse_a_configuration_edited_after_starting(self):
+        from workflows.network_properties.execution import configuration_fingerprint
+        from workflows.network_properties.directory_summary import collect_projects
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary).resolve()/'p'
+            project.mkdir()
+            cfg = dict(DEFAULTS, platform='CPU', replicates=1, seed=100, network='input.structure.json',
+                       mechanical=False)
+            (project/'project.json').write_text(json.dumps(dict(cfg, seed=999)))
+            (project/'run_signature.json').write_text(json.dumps(dict(sha256=configuration_fingerprint(cfg))))
+            with self.assertRaisesRegex(ValueError, 'changed after starting'):
+                report(project)
+            with contextlib.redirect_stdout(io.StringIO()):
+                collected = collect_projects(project.parent)
+            self.assertEqual(collected['projects'], [])
+            self.assertIn('changed after starting', collected['errors'][0]['error'])
+
     def test_periodic_winding_distinguishes_network_from_finite_ring(self):
         graphs = [dict(atoms=[{'mass':12.}]*3,bonds=[[0,1,1],[1,2,1],[2,0,1]])]
         spanning = topology(graphs,np.array([[.1,0,0],[.43,0,0],[.76,0,0]]),np.eye(3))

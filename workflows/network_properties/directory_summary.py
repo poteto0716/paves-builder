@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import json
 import math
 import os
 from pathlib import Path
 from urllib.parse import quote
 
-from workflows.network_properties.execution import file_lock
+from workflows.network_properties.execution import check_run_signature, configuration_fingerprint, file_lock
 from workflows.network_properties.replica_summary import collect as collect_replicas
 
 MARKER = '.network_properties_collection.json'
@@ -76,6 +75,7 @@ def _project(root, project):
         cfg = json.loads((project / 'project.json').read_text())
         if type(cfg['replicates']) is not int or cfg['replicates'] < 1:
             raise ValueError('replicates must be a positive integer')
+        check_run_signature(project, cfg)
         ids, properties = collect_replicas(project, cfg)
         completed = sum(replica_complete(project, cfg, i) for i in range(1, cfg['replicates'] + 1))
         available = any(p['n_available'] for p in properties.values())
@@ -88,9 +88,12 @@ def _project(root, project):
             smoke=bool(cfg.get('smoke')), target_total_atoms=build.get('total_atoms'),
             target_conversion=build.get('target_conversion'), cooling_rate_K_ns=cfg.get('cooling_rate_K_ns'),
             pressure_atm=cfg.get('pressure_atm'), input_sha256=cfg.get('input_sha256'),
-            configuration_sha256=hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest())
+            configuration_sha256=configuration_fingerprint(cfg))
         metadata = {k:_finite(v) for k,v in metadata.items()}
+        from workflows.network_properties.execution import replica_seeds
+        seeds = replica_seeds(project, cfg) if isinstance(cfg.get('seed'), int) else {}
         return dict(metadata=metadata, replica_ids=ids, properties=properties,
+                    replica_seeds={f'replica_{i:02d}': seed for i, seed in seeds.items()},
                     solvents=cfg.get('solvents', []), solvent_molecules=cfg.get('solvent_molecules'))
 
 
@@ -172,9 +175,9 @@ def collect_projects(root):
             for key,p in record['properties'].items():
                 common = dict(metadata, **_condition(record,key), property=key, label=p['label'], unit=p['unit'])
                 aggregate.append(dict(common, **{k:p[k] for k in STATS}))
-                for i,replica in enumerate(record['replica_ids'],1):
+                for replica in record['replica_ids']:
                     value = p['replicas'][replica]
-                    seed = metadata['base_seed'] + i if isinstance(metadata['base_seed'],int) else None
+                    seed = record['replica_seeds'].get(replica)
                     individuals.append(dict(common, replica=replica, seed=seed, value=value['value'],
                         status=value['status'], checks_passed=value['checks_passed'],
                         source=value['source']))

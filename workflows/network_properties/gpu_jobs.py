@@ -15,6 +15,7 @@ import uuid
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+from workflows.network_properties.execution import configuration_fingerprint, die_with_parent, file_lock
 SCRIPT = Path(__file__).with_name('network_properties.py')
 
 
@@ -58,7 +59,9 @@ def replica_complete(project, cfg, replica):
         required += [base / 'crosslinking/done.json',
                      base / 'crosslinking/results/epoxy/final.structure.json']
     if cfg['mechanical']:
-        required.append(base / 'mechanical/result.json')
+        from workflows.network_properties.mechanical import result_current
+        if not result_current(base):
+            return False
     required += [base / 'solvents' / s['name'] / 'result.json' for s in cfg['solvents']]
     return all(path.is_file() for path in required)
 
@@ -101,9 +104,26 @@ def mark_interrupted(project, job):
     """A worker killed by a signal cannot close its own progress record."""
     from workflows.network_properties.execution import read_progress, finish_progress
     base = Path(project) / f'replica_{job["replica"]:02d}'
+    try:
+        with file_lock(base / '.run.lock', blocking=False):
+            pass
+    except RuntimeError:
+        return  # Refused by the lock: another live worker owns this progress record.
     progress = read_progress(base)
     if progress and progress.get('state') == 'running':
         finish_progress(base, 'failed', error=job['error'], error_log=job.get('error_log'))
+
+
+def live_replicas(project, cfg):
+    """Replicas whose run lock is held by a process, whoever started it."""
+    live = []
+    for replica in range(1, cfg['replicates'] + 1):
+        try:
+            with file_lock(Path(project) / f'replica_{replica:02d}/.run.lock', blocking=False):
+                pass
+        except RuntimeError:
+            live.append(replica)
+    return live
 
 
 def worker_command(project, replica):
@@ -112,12 +132,12 @@ def worker_command(project, replica):
 
 def plan(project, cfg, devices):
     from workflows.network_properties.network_properties import input_digest
-    import hashlib
+    from workflows.network_properties.execution import replica_seed
     submission = dict(project=str(project), created_at=now(),
-        configuration_sha256=hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest(),
+        configuration_sha256=configuration_fingerprint(cfg),
         input_sha256=input_digest(project, cfg),
         gpus=devices, max_parallel=min(len(devices), cfg['replicates']),
-        jobs=[dict(replica=i, seed=cfg['seed'] + i,
+        jobs=[dict(replica=i, seed=replica_seed(project, cfg, i),
             state='completed' if replica_complete(project, cfg, i) else 'queued',
             log=str(Path(project) / 'jobs' / f'replica_{i:02d}.log'))
             for i in range(1, cfg['replicates'] + 1)])
@@ -146,6 +166,11 @@ def submit(args):
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             raise RuntimeError(f'GPU jobs are already running for {project}; use status') from exc
+        # Workers stop when the launcher dies, but not instantly; never share a GPU with one.
+        live = live_replicas(project, cfg)
+        if live:
+            raise RuntimeError(f'Replicas {live} of {project} are still running outside this launcher; '
+                               'wait for them to stop or stop them, then submit again')
         initialize_project(project)
         if all(job['state'] == 'completed' for job in submission['jobs']):
             report(project)
@@ -177,9 +202,7 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
     submission = json.loads(Path(path).read_text())
     project = Path(submission['project'])
     cfg = json.loads((project / 'project.json').read_text())
-    import hashlib
-    fingerprint = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
-    if fingerprint != submission['configuration_sha256']:
+    if configuration_fingerprint(cfg) != submission['configuration_sha256']:
         write_json(project / 'jobs/status.json', dict(submission, state='failed',
             error='configuration changed after submission', finished_at=now()))
         raise ValueError('configuration changed after submission')
@@ -220,7 +243,9 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
                         output.flush()
                         child = subprocess.Popen(command_factory(project, job['replica']),
                             env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,
-                            stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+                            stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
+                            # A killed launcher must not leave a worker on a GPU it no longer tracks.
+                            preexec_fn=die_with_parent)
                     job.update(state='running', pid=child.pid, gpu_index=device['index'],
                                gpu_uuid=key, started_at=now())
                     active[key] = (child, job)
@@ -287,6 +312,89 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
             signal.signal(sig, handler)
 
 
+def next_seed(cfg, used, replica):
+    """First seed + k*replicates + replica (k >= 1) not yet used in this project.
+
+    The initial seeds are seed + 1..replicates, so successive attempts of
+    different replicas never collide with each other or with first attempts.
+    """
+    k = 1
+    while (candidate := cfg['seed'] + k * cfg['replicates'] + replica) in used:
+        k += 1
+    return candidate
+
+
+def reseed(args):
+    """Give failed replicas a new seed and archive their previous attempt.
+
+    The archived directory keeps every output and error log of the old seed.
+    The replica then restarts from scratch (in construction mode, from packing),
+    because every stage of a replica derives from its seed.
+    """
+    import shutil
+    from workflows.network_properties.execution import (read_progress, replica_seeds, seed_overrides,
+                                                        write_seed_overrides)
+    project = args.project.resolve()
+    cfg = json.loads((project / 'project.json').read_text())
+    replicas = sorted(set(args.replica))
+    if any(not 1 <= r <= cfg['replicates'] for r in replicas):
+        raise ValueError(f'--replica must lie between 1 and {cfg["replicates"]}')
+    if args.seed is not None and len(replicas) != 1:
+        raise ValueError('--seed sets one replica; omit it to choose new seeds automatically')
+    jobs = project / 'jobs'
+    jobs.mkdir(exist_ok=True)
+    # Exclude a concurrent submit: its launcher holds this lock while replicas run.
+    with file_lock(jobs / '.launcher.lock', blocking=False), file_lock(project / '.project.lock'):
+        live = set(live_replicas(project, cfg)) & set(replicas)
+        if live:
+            raise RuntimeError(f'Replicas {sorted(live)} are running; stop them before reseeding')
+        overrides = seed_overrides(project)
+        current = replica_seeds(project, cfg)
+        used = set(current.values()) | {s for o in overrides.values() for s in o.get('previous', [])}
+        if args.seed is not None and args.seed in used:
+            raise ValueError(f'seed {args.seed} was already used in this project')
+        plan = []
+        for replica in replicas:
+            base = project / f'replica_{replica:02d}'
+            progress = read_progress(base) or {}
+            if replica_complete(project, cfg, replica) and not args.force:
+                raise ValueError(f'replica {replica} has completed; use --force to recompute it with a new seed')
+            if progress.get('state') != 'failed' and not args.force:
+                raise ValueError(f'replica {replica} has not failed (state: {progress.get("state", "not started")}); '
+                                 'use --force to reseed it anyway')
+            seed = args.seed if args.seed is not None else next_seed(cfg, used, replica)
+            used.add(seed)
+            plan.append((replica, base, current[replica], seed, progress))
+        for replica, base, old, seed, progress in plan:
+            print(f'replica_{replica:02d}: seed {old} -> {seed}'
+                  + (f' (failed during: {progress.get("stage")})' if progress.get('state') == 'failed' else ''))
+        if args.dry_run:
+            return plan
+        for replica, base, old, seed, progress in plan:
+            archive = None
+            if base.exists():
+                index = 1
+                while (archive := project / 'failed_attempts' / f'replica_{replica:02d}_seed{old}_{index}').exists():
+                    index += 1
+                archive.parent.mkdir(exist_ok=True)
+                shutil.move(base, archive)
+                for suffix in ('.error.log',):
+                    log = jobs / f'replica_{replica:02d}{suffix}'
+                    if log.exists():
+                        shutil.move(log, archive / f'job{suffix}')
+            entry = overrides.get(str(replica), dict(previous=[]))
+            entry.update(seed=seed, previous=entry['previous'] + [old], reseeded_at=now(),
+                         previous_error=progress.get('error'))
+            entry.setdefault('archives', []).append(None if archive is None else str(archive.relative_to(project)))
+            overrides[str(replica)] = entry
+            write_seed_overrides(project, overrides)
+            print(f'  previous attempt archived: {archive}' if archive else '  (no previous output)')
+    if args.submit:
+        return submit(args)
+    print(f'Run them with: {sys.executable} {SCRIPT} submit {project} [--gpus ...]')
+    return plan
+
+
 def status(args):
     project = args.project.resolve()
     path = project / 'jobs/status.json'
@@ -302,7 +410,8 @@ def status(args):
         if launcher in (None, 'Z'):
             print(f'WARNING: launcher PID {state.get("pid")} is '
                   f'{"a zombie" if launcher == "Z" else "not running"}; job states below are not '
-                  'being updated. Check each replica, then submit again to resume unfinished replicas.')
+                  'being updated. Its workers stop with it; submit again to resume unfinished replicas '
+                  '(submit refuses while one is still running).')
     for job in state['jobs']:
         name = f'replica_{job["replica"]:02d}'
         print(f'{name}: {job["state"]:10s} seed={job["seed"]} GPU={job.get("gpu_index", "—")} log={job["log"]}')

@@ -1,4 +1,4 @@
-# 架橋エポキシネットワークの構築
+# 架橋ネットワーク（エポキシ、オキセタンなど）の構築
 
 溶媒を加える前の架橋モデルを、公開wheelのPAVES APIで生成します。
 モノマーのSMILESからpackし、開始点を作成、加圧NPTと初期NPT緩和の後に
@@ -115,6 +115,18 @@ NVT 0.1 fs×1000 step（`--final-relaxation-steps`）→ NPT 1 atm・1 fs×1,000
 これは中性OHへ活動状態を付けて伝播させる有効モデルで、帯電したカチオン機構そのものを
 再現するモデルではありません。反応探索距離から実際の反応速度や障壁は求まりません。
 ルールの定義は[YAML_GUIDE.md](YAML_GUIDE.md)を参照してください。
+
+反応点の数は`activation.yaml`の`target_smarts`への一致で数え、エポキシ環は必須ではありません。
+オキセタン用のルールは`oxetane/`にあります（カレントディレクトリの`activation.yaml`／`reactions.yaml`を
+読むので、別の作業ディレクトリへコピーして実行します）。
+
+```bash
+mkdir -p ../oxetane_run && cp oxetane/*.yaml ../oxetane_run/ && cd ../oxetane_run
+python ../crosslinking/crosslinking.py --project oxt221 --smiles 'CCC1(COCC2(CC)COC2)COC1' --platform CUDA
+```
+
+`--activation-count 0`または`--activation-fraction 0`では開始点を作らず、反応cycleを省いて
+packing・緩和・最終MDだけを行います（反応率0の未反応モノマー）。
 
 短いCPU動作確認:
 

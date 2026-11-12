@@ -1,4 +1,4 @@
-"""Per-replica epoxy construction -> thermal history -> dry and solvent properties."""
+"""Per-replica network construction (epoxy, oxetane, ...) -> thermal history -> dry and solvent properties."""
 from __future__ import annotations
 
 import argparse
@@ -17,15 +17,19 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.analysis import analyze_npt, analyze_nvt, aggregate, topology, DA
 from workflows.thermomechanical.analysis import fit_tg
-from workflows.network_properties.execution import file_lock, replica_progress, set_stage
+from workflows.network_properties.execution import (check_run_signature, configuration_fingerprint,
+                                                    file_lock, replica_progress, replica_seed, replica_seeds,
+                                                    set_stage)
 
 
-DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=.5,
+# Thermal history, 300 K NPT/NVT and solvents use H-bond constraints and 1 fs.
+# The elastic branch uses its own unconstrained 0.25 fs (mechanical.py).
+DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=1.,
     pressure_atm=1., high_K=800., low_K=100., temperature_step_K=20.,
     heat_step_ps=100., high_equilibration_ps=1000., cooling_rate_K_ns=40.,
     reheat_step_ps=100., equilibration_300_ps=1000., production_ps=10000.,
     sample_interval_ps=1., min_effective_samples=100, minimization_iterations=3000,
-    volume_interval_steps=100, volume_fraction=.002, solvents=[],
+    volume_interval_steps=50, volume_fraction=.002, solvents=[],
     solvent_molecules=10, solvent_nvt_ps=100., solvent_equilibration_ps=1000.,
     solvent_production_ps=10000., diffusion_min_duration_ps=1000.,
     alchemical_windows=22, alchemical_equilibration_ps=100.,
@@ -122,6 +126,8 @@ def new(args):
                replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']),
                seed=args.seed,
                solvent_molecules=args.solvent_molecules, mechanical=not args.skip_mechanical)
+    if args.high_temperature is not None:
+        cfg['high_K'] = args.high_temperature
     for entry in args.solvent:
         name, sep, smiles = entry.partition('=')
         if not sep:
@@ -138,7 +144,7 @@ def new(args):
             nvt_production_ps=.02)
     definitions = None
     if args.network is not None:
-        construction_flags = ('total_atoms', 'atom_count_mode', 'cycles', 'target_conversion',
+        construction_flags = ('chemistry', 'total_atoms', 'atom_count_mode', 'cycles', 'target_conversion',
                               'activation_count', 'activation_fraction', 'max_reactions_per_cycle',
                               'activation_yaml', 'reactions_yaml', 'compression_pressure_mpa',
                               'compression_steps', 'reaction_cutoff', 'max_reaction_cutoff',
@@ -147,8 +153,8 @@ def new(args):
                               'reaction_minimization_radius', 'packing_density',
                               'final_relaxation_steps', 'final_md_steps')
         if (any(getattr(args, name, None) is not None for name in construction_flags)
-                or args.save_trajectory or args.fixed_reaction_cutoff):
-            raise ValueError('--network cannot be combined with epoxy construction options')
+                or args.save_trajectory or args.fixed_reaction_cutoff or args.remove_sol_fraction):
+            raise ValueError('--network cannot be combined with network construction options')
         source = args.network.resolve()
         data = json.loads(source.read_text())
         if not all(k in data for k in ('graphs', 'positions', 'box_vectors')):
@@ -221,12 +227,14 @@ def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, min
                 potential_kJ_mol=state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
                 kinetic_kJ_mol=state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole)))
     state = runner.context.getState(getPositions=True, getVelocities=True)
+    volume = state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3)
     (directory / 'state.xml').write_text(mm.XmlSerializer.serialize(state))
     write_json(directory / 'final.structure.json', runner.structure_data())
     write_json(directory / 'samples.json', rows)
     write_csv(directory / 'samples.csv', rows)
     write_json(marker, dict(temperature_K=temperature, duration_ps=duration_ps,
         actual_duration_ps=elapsed * cfg['timestep_fs'] / 1000,
+        final_density_g_cm3=float(mass * DA / (volume * 1e-27) / 1000),
         volume_attempts=runner.volume_attempts, volume_accepts=runner.volume_accepts))
     return rows
 
@@ -235,6 +243,29 @@ def temperature_grid(high, low, increment):
     # Include exactly 300 K even when the chosen step does not divide the range.
     values = list(np.arange(high, low, -increment)) + [low, 300.]
     return sorted(set(float(x) for x in values if low <= x <= high), reverse=True)
+
+
+def history_densities(directory):
+    """Density at the end of every thermal-history phase, and the high-temperature check.
+
+    An uncrosslinked monomer or oligomer liquid can boil or cavitate at the
+    high temperature (fixed topology, 1 atm). The voids then survive the cooling
+    and corrupt the Tg/CTE fit and the 300 K fluctuations; a large density drop
+    at the high temperature is the sign of it.
+    """
+    phases = []
+    for marker in sorted(Path(directory).glob('0*/done.json')):
+        done = json.loads(marker.read_text())
+        phases.append(dict(phase=marker.parent.name, temperature_K=done['temperature_K'],
+                           final_density_g_cm3=done.get('final_density_g_cm3'),
+                           volume_acceptance=(done['volume_accepts'] / done['volume_attempts']
+                                              if done.get('volume_attempts') else None)))
+    density = {p['phase']: p['final_density_g_cm3'] for p in phases}
+    start, high = density.get('00_minimize'), density.get('02_high_equilibration')
+    ratio = high / start if start and high else None
+    return dict(phases=phases, high_to_initial_density_ratio=ratio,
+                # Thermal expansion alone gives about 0.8-0.85 for these resins from 300 to 800 K.
+                possible_vaporization=bool(ratio is not None and ratio < .7))
 
 
 def nvt_properties(runner, directory, cfg, mass_Da):
@@ -287,7 +318,7 @@ def dry_properties(project, cfg, replica):
     # Count zero means no solvent is appended; reusing host avoids typing a dummy solvent.
     runner = FixedLoadingSimulation(host, host, host.positions_nm, 0, box_nm=host.box_nm,
         temperature=300., pressure_bar=cfg['pressure_atm'] * 1.01325,
-        timestep_fs=cfg['timestep_fs'], platform=cfg['platform'], seed=cfg['seed'] + replica,
+        timestep_fs=cfg['timestep_fs'], platform=cfg['platform'], seed=replica_seed(project, cfg, replica),
         volume_interval=cfg['volume_interval_steps'], volume_fraction=cfg['volume_fraction'])
     try:
         phase(runner, directory / '00_minimize', cfg, 300., cfg['heat_step_ps'], minimize=True)
@@ -319,6 +350,7 @@ def dry_properties(project, cfg, replica):
         mass = sum(host.system.getParticleMass(i).value_in_unit(unit.dalton)
                    for i in range(host.system.getNumParticles()))
         result = dict(smoke=cfg['smoke'], thermal_history=f'{cfg["high_K"]:g} -> {cfg["low_K"]:g} -> 300 K; fixed topology',
+            thermal_history_density=history_densities(directory),
             npt=analyze_npt(rows, mass, 300., cfg['pressure_atm'], cfg['min_effective_samples']))
         try:
             result['cooling'] = fit_tg([r['target_temperature_K'] for r in cooling],
@@ -340,13 +372,29 @@ def dry_properties(project, cfg, replica):
             result['cooling'] = dict(fit_checks_passed=False, reason=str(exc))
         snapshot = runner.snapshot()
         result['structure'] = structural_diagnostics(host, host, snapshot['positions'], snapshot['box'],
-            0, seed=cfg['seed'] + replica, free_volume_samples=100 if cfg['smoke'] else 10000)
+            0, seed=replica_seed(project, cfg, replica), free_volume_samples=100 if cfg['smoke'] else 10000)
         result['topology'] = topology(host.graphs, snapshot['positions'], snapshot['box'])
         from workflows.network_properties.network_graph import network_structure
         result['network'] = network_structure(host.graphs, snapshot['positions'], snapshot['box'])
         result['npt']['sampling_checks_passed'] &= not cfg['smoke']
+        if result['thermal_history_density']['possible_vaporization']:
+            # Voids from boiling at high_K remain in the glass: neither the cooling
+            # curve nor the 300 K fluctuations describe the bulk material.
+            reason = (f'density at {cfg["high_K"]:g} K fell to '
+                      f'{result["thermal_history_density"]["high_to_initial_density_ratio"]:.2f} of the start '
+                      '(boiling/cavitation); lower high_K (--high-temperature)')
+            result['cooling']['fit_checks_passed'] = False
+            result['cooling']['vaporization_warning'] = reason
+            result['npt']['sampling_checks_passed'] = False
+            result['npt']['vaporization_warning'] = reason
+            print(f'WARNING: {reason}', flush=True)
         result['nvt'] = nvt_properties(runner, directory / '07_nvt_300K', cfg, mass)
         write_json(directory / 'dry_result.json', result)
+        try:
+            from workflows.network_properties.plots import plot_tg
+            print(f'Tg figure: {plot_tg(directory, result)}', flush=True)
+        except Exception as exc:  # a figure must never fail a finished calculation
+            print(f'WARNING: Tg figure not written: {exc}', flush=True)
     finally:
         runner.close()
     return result
@@ -361,7 +409,7 @@ def solvent_properties(project, cfg, replica, specification):
     directory.mkdir(parents=True, exist_ok=True)
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
-    seed = cfg['seed'] + replica
+    seed = replica_seed(project, cfg, replica)
     name = specification['name']
     host = load_network(base / 'relaxed_300K.structure.json')
     packed_path = directory / 'packed'
@@ -427,6 +475,7 @@ def report(project):
 def _report(project):
     from workflows.network_properties.replica_summary import collect, write_tables, markdown
     cfg = json.loads((project / 'project.json').read_text())
+    check_run_signature(project, cfg)
     replica_ids, properties = collect(project, cfg)
     write_tables(project, replica_ids, properties)
     dry = [json.loads(path.read_text()) for path in sorted(project.glob('replica_*/dry_result.json'))]
@@ -438,7 +487,7 @@ def _report(project):
         tg_fit_checks_passed=bool(len(dry) == cfg['replicates'] and not cfg['smoke']
             and all(r['cooling']['fit_checks_passed'] for r in dry)),
         independent_network_topologies=cfg.get('input_mode') == 'epoxy',
-        note=('Each replica packs and crosslinks its own epoxy network using an independent seed.'
+        note=('Each replica packs and crosslinks its own network using an independent seed.'
               if cfg.get('input_mode') == 'epoxy' else
               'Replicas share the supplied topology; only thermal trajectories/seeds differ.'),
         scope=dict(thermodynamics='Density, Cp/Cv, CTE, compressibility, Kt/Ks, bulk sound speed.',
@@ -447,7 +496,8 @@ def _report(project):
             dielectric='Fixed-charge NVT dielectric tensor from continuous atomic charge displacements; no electronic polarization.',
             cohesive_energy='A percolating network has no unique isolated-molecule reference; not reported.'))
     result['scope']['mechanical'] = 'Requested; see replica outputs.' if cfg['mechanical'] else 'Disabled in project.json.'
-    paths = sorted(project.glob('replica_*/mechanical/result.json'))
+    from workflows.network_properties.mechanical import result_current
+    paths = [p for p in sorted(project.glob('replica_*/mechanical/result.json')) if result_current(p.parent.parent)]
     if paths:
         values = [json.loads(p.read_text()) for p in paths]
         result['mechanical'] = dict(completed_replicas=len(values),
@@ -469,7 +519,7 @@ def _report(project):
             diffusion_converged=bool(len(values) == cfg['replicates'] and not cfg['smoke'] and
                 all(v['fixed_loading']['diffusion']['converged'] for v in values)))
     result.update(replica_ids=replica_ids, property_summary=properties,
-        replica_seeds={replica: cfg['seed'] + i for i, replica in enumerate(replica_ids,1)} if 'seed' in cfg else {},
+        replica_seeds={f'replica_{i:02d}': seed for i, seed in replica_seeds(project, cfg).items()} if 'seed' in cfg else {},
         property_tables=dict(per_replica='replica_properties.csv', aggregate='property_summary.csv'))
     result['network_builds'] = {replica: json.loads((project / replica / 'network_origin.json').read_text())
         for replica in replica_ids if (project / replica / 'network_origin.json').is_file()}
@@ -481,7 +531,7 @@ def _report(project):
         f'NPT sampling checks passed: {result["dry_sampling_checks_passed"]}; Tg fit checks passed: {result["tg_fit_checks_passed"]}.', '']
     text += markdown(replica_ids, properties)
     if result['network_builds']:
-        text += ['', '**Epoxy construction per replica**', '',
+        text += ['', '**Network construction per replica**', '',
             '| Replica | Seed | Atoms | Conversion | Target | Target reached |',
             '|---|---:|---:|---:|---:|---|']
         for replica, build in result['network_builds'].items():
@@ -511,11 +561,8 @@ def _initialize_project(project):
     validate(cfg)
     if input_digest(project, cfg) != cfg['input_sha256']:
         raise ValueError('input structure was changed')
-    fingerprint = hashlib.sha256(json.dumps(cfg, sort_keys=True).encode()).hexdigest()
-    signature = project / 'run_signature.json'
-    if signature.exists() and json.loads(signature.read_text())['sha256'] != fingerprint:
-        raise ValueError('configuration changed after starting; create a new project')
-    write_json(signature, dict(sha256=fingerprint))
+    check_run_signature(project, cfg)
+    write_json(project / 'run_signature.json', dict(sha256=configuration_fingerprint(cfg)))
     if not (project / 'runtime.json').exists():
         import openmm
         import polypaves
@@ -533,20 +580,21 @@ def run(args):
     replicas = [selected] if selected is not None else range(1, cfg['replicates'] + 1)
     for replica in replicas:
         base = project / f'replica_{replica:02d}'
+        seed = replica_seed(project, cfg, replica)
         # The lock comes first: a refused duplicate must not overwrite progress/error records.
         with file_lock(base / '.run.lock', blocking=False) as lock, replica_progress(base):
-            write_json(base / 'execution.json', dict(replica=replica, seed=cfg['seed'] + replica,
+            write_json(base / 'execution.json', dict(replica=replica, seed=seed,
                 platform=cfg['platform'], cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES')))
             if cfg.get('input_mode') == 'epoxy':
                 from workflows.network_properties.epoxy_pipeline import ensure_network
-                set_stage(base, 'crosslinking: pack, compress, equilibrate and react', seed=cfg['seed'] + replica)
+                set_stage(base, 'crosslinking: pack, compress, equilibrate and react', seed=seed)
                 ensure_network(project, cfg, replica, lock)
             set_stage(base, 'dry properties: thermal history')
             dry_properties(project, cfg, replica)
             if cfg['mechanical']:
                 from workflows.network_properties.mechanical import run_mechanical
                 set_stage(base, 'mechanical: elastic constants')
-                run_mechanical(base, cfg, cfg['seed'] + replica)
+                run_mechanical(base, cfg, seed)
             for spec in cfg['solvents']:
                 solvent_properties(project, cfg, replica, spec)
         if not getattr(args, 'defer_report', False):
@@ -556,25 +604,30 @@ def run(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
-    create = sub.add_parser('new', help='create a full epoxy pipeline, or supply a saved dry network')
+    create = sub.add_parser('new', help='create a full construction pipeline, or supply a saved dry network')
     create.add_argument('project', type=Path)
     inputs = create.add_mutually_exclusive_group()
-    inputs.add_argument('--network', type=Path, help='reuse one saved network; omit to build epoxy per replica')
-    inputs.add_argument('--epoxy-smiles', help='epoxy SMILES; default TMP triglycidyl ether')
-    create.add_argument('--total-atoms', type=int, help='epoxy target atom count (default 20000, rounded above)')
+    inputs.add_argument('--network', type=Path, help='reuse one saved network; omit to build one per replica')
+    inputs.add_argument('--smiles', '--epoxy-smiles', dest='epoxy_smiles',
+                        help='monomer SMILES; default TMP triglycidyl ether (epoxy) or OXT-221 (oxetane)')
+    from workflows.network_properties.epoxy_pipeline import CHEMISTRIES
+    create.add_argument('--chemistry', choices=sorted(CHEMISTRIES),
+                        help='ring-opening preset: activation/reaction YAMLs and default monomer (default epoxy)')
+    create.add_argument('--total-atoms', type=int, help='target atom count (default 20000, rounded above)')
     create.add_argument('--atom-count-mode', choices=('above','nearest','floor','exact'))
     create.add_argument('--cycles', type=int, help='maximum crosslinking cycles (default 5000)')
     create.add_argument('--target-conversion', type=float, help='crosslinking target (default 0.995)')
     starts = create.add_mutually_exclusive_group()
-    starts.add_argument('--activation-count', type=int)
-    starts.add_argument('--activation-fraction', type=float)
+    starts.add_argument('--activation-count', type=int, help='number of start sites; 0 = unreacted monomer')
+    starts.add_argument('--activation-fraction', type=float,
+                        help='fraction of ring sites activated (0 <= f < 1); 0 = unreacted monomer')
     create.add_argument('--max-reactions-per-cycle', type=int)
     create.add_argument('--final-relaxation-steps', type=int,
                         help='after crosslinking: NVT steps at 0.1 fs before the final MD (default 1000)')
     create.add_argument('--final-md-steps', type=int,
                         help='after crosslinking: NPT steps at 1 fs and 1 atm before saving (default 1000000 = 1 ns)')
     create.add_argument('--packing-density', type=float,
-                        help='initial epoxy packing density in g/cm3 before compression (default 0.5)')
+                        help='initial packing density in g/cm3 before compression (default 0.5)')
     create.add_argument('--compression-pressure-mpa', type=float,
                         help='pre-crosslinking compression NPT pressure in MPa (default 200)')
     create.add_argument('--compression-steps', type=int,
@@ -609,6 +662,9 @@ def main(argv=None):
     create.add_argument('--solvent', action='append', default=[], metavar='NAME=SMILES')
     create.add_argument('--solvent-molecules', type=int, default=10)
     create.add_argument('--skip-mechanical', action='store_true')
+    create.add_argument('--high-temperature', type=float,
+                        help='highest temperature of the thermal history in K (default 800). Uncrosslinked '
+                             'monomers boil there at 1 atm; use e.g. 500-600 for them')
     create.add_argument('--smoke', action='store_true')
     create.set_defaults(action=new)
     for name, action in [('run',run), ('report',lambda a: report(a.project))]:
@@ -618,12 +674,22 @@ def main(argv=None):
             cmd.add_argument('--replica', type=int, help='run only this replica (1-based)')
             cmd.add_argument('--defer-report', action='store_true', help=argparse.SUPPRESS)
         cmd.set_defaults(action=action)
-    from workflows.network_properties.gpu_jobs import submit, status
+    from workflows.network_properties.gpu_jobs import reseed, submit, status
     launch = sub.add_parser('submit', help='launch replica jobs on selected local GPUs')
     launch.add_argument('project', type=Path)
     launch.add_argument('--gpus', help='physical GPU indices, e.g. 0,2; default: all visible GPUs')
     launch.add_argument('--dry-run', action='store_true', help='show the GPU/seed plan without launching jobs')
     launch.set_defaults(action=submit)
+    retry = sub.add_parser('reseed', help='give failed replicas a new seed and archive the failed attempt')
+    retry.add_argument('project', type=Path)
+    retry.add_argument('--replica', type=int, action='append', required=True,
+                       help='failed replica to rerun (1-based); repeat for several')
+    retry.add_argument('--seed', type=int, help='new seed for one replica (default: automatic, unused)')
+    retry.add_argument('--force', action='store_true', help='also reseed a replica that has not failed')
+    retry.add_argument('--submit', action='store_true', help='submit the reseeded replicas to the GPUs right away')
+    retry.add_argument('--gpus', help='with --submit: physical GPU indices, e.g. 0,2')
+    retry.add_argument('--dry-run', action='store_true', help='show the new seeds without changing anything')
+    retry.set_defaults(action=reseed)
     check = sub.add_parser('status', help='show local GPU job states and logs')
     check.add_argument('project', type=Path)
     check.set_defaults(action=status)

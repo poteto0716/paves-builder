@@ -36,18 +36,25 @@ def thermodynamics(rows, mass_Da, temperature_K, pressure_atm):
     if len(rows) < 4 or mass_Da <= 0 or temperature_K <= 0:
         raise ValueError('need at least four samples and positive mass/temperature')
     v = np.array([r['volume_nm3'] for r in rows]) * 1e-27
-    energy = np.array([r['potential_kJ_mol'] + r['kinetic_kJ_mol'] for r in rows]) * 1000 / NA
-    if not np.isfinite(v).all() or not np.isfinite(energy).all() or np.any(v <= 0):
+    potential = np.array([r['potential_kJ_mol'] for r in rows]) * 1000 / NA
+    kinetic = np.array([r['kinetic_kJ_mol'] for r in rows]) * 1000 / NA
+    if not np.isfinite(v).all() or not np.isfinite(potential + kinetic).all() or np.any(v <= 0):
         raise ValueError('nonfinite energies or nonpositive volumes')
-    h = energy + pressure_atm * 101325 * v
+    pv = pressure_atm * 101325 * v
+    h = potential + kinetic + pv
+    # Momenta are independent of the configuration and the volume in NPT, so
+    # Cov(V, K) = 0: alpha uses the configurational enthalpy U + PV. Keeping K
+    # adds only noise (about half of Var(H) for a solid) and lets short runs
+    # report negative expansion coefficients.
+    h_conf = potential + pv
     mass = mass_Da * DA
     rho = mass / v.mean()
     # Subtract a reference before centering to preserve exactly constant traces.
-    dv, dh = v - v[0], h - h[0]
-    dv, dh = dv - dv.mean(), dh - dh.mean()
+    dv, dh, dhc = v - v[0], h - h[0], h_conf - h_conf[0]
+    dv, dh, dhc = dv - dv.mean(), dh - dh.mean(), dhc - dhc.mean()
     kappa = float(np.mean(dv * dv) / (KB * temperature_K * v.mean()))
     cp = float(np.mean(dh * dh) / (KB * temperature_K**2 * mass))
-    alpha = float(np.mean(dv * dh) / (KB * temperature_K**2 * v.mean()))
+    alpha = float(np.mean(dv * dhc) / (KB * temperature_K**2 * v.mean()))
     cv = cp - temperature_K * alpha**2 / (rho * kappa) if kappa > 0 else None
     ks = kappa * cv / cp if cv is not None and cp > 0 else None
     return dict(density_g_cm3=float(rho / 1000),
