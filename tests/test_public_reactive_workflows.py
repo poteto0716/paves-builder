@@ -158,7 +158,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
                 '--project', 'kekule', '--smiles', kekule, '--total-atoms', '400', '--activation-count', '1',
                 '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
-                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--max-reactions-per-cycle', '1',
+                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--pre-reaction-sampling-steps', '0', '--reference-npt-steps', '0', '--max-reactions-per-cycle', '1',
                 '--reaction-cutoff', '10', '--max-reaction-cutoff', '10', '--minimization-iterations', '100'],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
@@ -185,6 +185,8 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--post-reaction-md-steps', '2',
                 '--final-relaxation-steps', '3', '--final-md-steps', '4',
+                '--pre-reaction-sampling-steps', '6', '--pre-reaction-frame-steps', '2',
+                '--reference-npt-steps', '4', '--reference-frame-steps', '1',
                 '--relaxation-stages', json.dumps(stages)],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
             self.assertEqual(completed.returncode, 0, completed.stdout[-3000:] + completed.stderr[-3000:])
@@ -198,6 +200,24 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertEqual(len(cycle['md_stages']), 3)
             self.assertEqual((settings['stop_after_idle_cycles'], settings['template_workers']), (200, 4))
             self.assertEqual(json.loads((output / 'metrics.json').read_text())['stop_reason'], 'max_cycles')
+            # Initial state plus three 2-step intervals of the pre-reaction equilibrium at the default 90 C reaction temperature.
+            metrics = json.loads((output / 'metrics.json').read_text())
+            pre = metrics['pre_reaction_epoxides']
+            self.assertEqual((pre['frames'], pre['temperature_K'], pre['contact_cutoffs_A']), (4, 363.15, [10.]))
+            self.assertEqual(pre['epoxides'], metrics['initial_epoxide_sites'] - 1)
+            self.assertAlmostEqual(pre['epoxide_number_density_nm3']['mean'] * pre['volume_nm3']['mean'],
+                                   pre['epoxides'], delta=.01 * pre['epoxides'])
+            self.assertTrue((output / 'pre_reaction/epoxide_msd.csv').is_file())
+            # 300 K reference volume (mean of the second half of 4 one-step frames) before heating to 90 C.
+            reference = metrics['reference_before_crosslinking']
+            self.assertEqual((reference['temperature_K'], reference['frames_averaged']), (300., 2))
+            self.assertEqual(metrics['volume_before_crosslinking_300K_nm3'], reference['volume_nm3'])
+            # One active end: it carries every growth reaction.
+            chains = metrics['kinetic_chains']
+            self.assertEqual(chains['active_ends'], 1)
+            self.assertEqual(chains['max_epoxide_units'], 1 + metrics['number_of_reactions'])
+            self.assertTrue((output / 'chain_lengths.csv').is_file())
+            self.assertEqual(settings['temperature_K'], 363.15)
             # Final structure follows 0.1 fs relaxation and 1 atm MD after the last reaction.
             self.assertTrue((output / 'reacted.structure.json').is_file())
             self.assertEqual((settings['final_relaxation_steps'], settings['final_md_steps']), (3, 4))
@@ -214,30 +234,58 @@ class PublicReactiveWorkflows(unittest.TestCase):
         spec.loader.exec_module(workflow)
         def atoms(prefix, n):
             return [dict(stable_atom_id=f'{prefix}{i}', mass=12.) for i in range(n)]
-        # A ring of 4 atoms closing across the x boundary (infinite), a finite
-        # ring of the same shape, a dimer of two monomers and one monomer.
-        network = dict(atoms=atoms('n', 4), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
+        # A network winding along x, y and z (three 4-rings closing across each
+        # boundary through a shared atom), a ring winding only along x (a
+        # column: removed), a finite ring of the same shape, a dimer and one monomer.
+        network = dict(atoms=atoms('n', 10), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1],
+                                                    [0, 4, 1], [4, 5, 1], [5, 6, 1], [6, 0, 1],
+                                                    [0, 7, 1], [7, 8, 1], [8, 9, 1], [9, 0, 1]])
+        column = dict(atoms=atoms('x', 4), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
         ring = dict(atoms=atoms('r', 4), bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
         dimer = dict(atoms=atoms('d', 2), bonds=[[0, 1, 1]])
         monomer = dict(atoms=atoms('m', 2), bonds=[[0, 1, 1]])
         xyz = np.array([[1, 1, 1], [3.5, 1, 1], [6, 1, 1], [8.5, 1, 1],
+                        [1, 3.5, 1], [1, 6, 1], [1, 8.5, 1], [1, 1, 3.5], [1, 1, 6], [1, 1, 8.5],
+                        [1, 3, 3], [3.5, 3, 3], [6, 3, 3], [8.5, 3, 3],
                         [1, 5, 1], [2.5, 5, 1], [2.5, 6.5, 1], [1, 6.5, 1],
                         [1, 8, 5], [2.5, 8, 5], [5, 5, 5], [6.5, 5, 5]], dtype=float)
-        structure = Structure(graphs=[network, ring, dimer, monomer], _components=[0, 0, 0, 0],
-                              _positions=xyz, box_vectors=np.diag([10.] * 3), report={'atoms': 12, 'molecules': 4})
-        origin = {**{f'n{i}': i // 2 for i in range(4)}, **{f'r{i}': 2 + i // 2 for i in range(4)},
-                  'd0': 4, 'd1': 5, 'm0': 6, 'm1': 6}
-        self.assertEqual(workflow.periodic_winding(network, xyz[:4], np.diag([10.] * 3)), [True, False, False])
+        box = np.diag([10.] * 3)
+        structure = Structure(graphs=[network, column, ring, dimer, monomer], _components=[0] * 5,
+                              _positions=xyz, box_vectors=box, report={'atoms': 22, 'molecules': 5})
+        origin = {**{f'n{i}': i // 2 for i in range(10)}, **{f'x{i}': 5 + i // 2 for i in range(4)},
+                  **{f'r{i}': 7 + i // 2 for i in range(4)}, 'd0': 9, 'd1': 10, 'm0': 11, 'm1': 11}
+        self.assertEqual(workflow.periodic_dimension(network, xyz[:10], box)[0], 3)
+        self.assertEqual(workflow.periodic_dimension(column, xyz[10:14], box)[0], 1)
+        # A string wound diagonally crosses x, y and z but is one-dimensional: it is sol.
+        diagonal = np.array([[1, 1, 1], [3.5, 3.5, 3.5], [6, 6, 6], [8.5, 8.5, 8.5]], dtype=float)
+        self.assertEqual(workflow.periodic_dimension(column, diagonal, box), (1, [[-1, -1, -1]]))
+        alone, _ = workflow.without_sol(Structure(graphs=[column], _components=[0], _positions=diagonal,
+            box_vectors=box, report={}), origin)
+        self.assertIsNone(alone)
         trimmed, sol = workflow.without_sol(structure, origin)
         self.assertEqual(trimmed.graphs, [network])
-        self.assertEqual(trimmed._positions.tolist(), xyz[:4].tolist())
-        self.assertEqual(trimmed.report, {'atoms': 4, 'molecules': 1})
-        self.assertEqual((sol['sol_monomers_removed'], sol['sol_oligomers_removed'], sol['sol_atoms_removed']), (1, 2, 8))
-        self.assertAlmostEqual(sol['sol_mass_fraction'], 8 / 12)
-        self.assertEqual(sol['network_winding_axes'], [[True, False, False]])
-        self.assertEqual(len(structure.graphs), 4)  # the input is not modified
-        nothing, sol = workflow.without_sol(Structure(graphs=[ring], _components=[0], _positions=xyz[4:8],
-            box_vectors=np.diag([10.] * 3), report={}), origin)
+        self.assertEqual(trimmed._positions.tolist(), xyz[:10].tolist())
+        self.assertEqual(trimmed.report, {'atoms': 10, 'molecules': 1})
+        self.assertEqual((sol['sol_monomers_removed'], sol['sol_oligomers_removed'], sol['sol_atoms_removed']), (1, 3, 12))
+        self.assertAlmostEqual(sol['sol_mass_fraction'], 12 / 22)
+        self.assertEqual(len(sol['network_period_vectors'][0]), 3)
+        self.assertEqual(sol['molecules_by_periodic_dimension'], {0: 3, 1: 1, 2: 0, 3: 1})
+        self.assertEqual(len(structure.graphs), 5)  # the input is not modified
+        # The gel holds 5 monomers (origins 0-4) with 3 rings each; two rings
+        # stay closed in the gel and one in the removed column does not count.
+        gel = workflow.gel_site_conversion(trimmed, origin, {('n1', 'n2', 'n3'), ('n4', 'n5', 'n6'),
+                                                             ('x0', 'x1', 'x2'), ('n9', 'x3', 'x0')}, 3)
+        self.assertEqual(gel, dict(gel_initial_epoxide_sites=15, gel_unreacted_epoxide_sites=2,
+                                   gel_reacted_epoxide_sites=13, gel_epoxide_conversion=13 / 15))
+        tracker = SimpleNamespace(to_dict=lambda: {'per_rule': {'relay': {'conversion_reactant': 1}}},
+                                  current={'relay': (frozenset({('n0', 'n1')}), frozenset({('n1', 'n2', 'n3')}))})
+        self.assertEqual(workflow.remaining_conversion_sites(tracker), {('n1', 'n2', 'n3')})
+        # A molecule winding along only one axis does not count as the gel.
+        column_only, _ = workflow.without_sol(Structure(graphs=[column], _components=[0], _positions=xyz[10:14],
+            box_vectors=box, report={}), origin)
+        self.assertIsNone(column_only)
+        nothing, sol = workflow.without_sol(Structure(graphs=[ring], _components=[0], _positions=xyz[14:18],
+            box_vectors=box, report={}), origin)
         self.assertIsNone(nothing)
         self.assertEqual(sol['sol_mass_fraction'], 1)
 
@@ -251,7 +299,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             completed = subprocess.run([sys.executable, str(ROOT / 'workflows/crosslinking/crosslinking.py'),
                 '--project', 'trim', '--total-atoms', '500', '--activation-count', '1',
                 '--platform', 'CPU', '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1',
-                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
+                '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--pre-reaction-sampling-steps', '0', '--reference-npt-steps', '0',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--remove-sol-fraction'],
                 cwd=project, env=env, capture_output=True, text=True, timeout=600)
@@ -283,7 +331,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
                 shutil.copy2(ROOT / 'workflows/crosslinking' / name, project / name)
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'epoxy',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--pre-reaction-sampling-steps', '0', '--reference-npt-steps', '0',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100'], project)
             network = project / 'results/epoxy/final.structure.json'
@@ -327,7 +375,7 @@ class PublicReactiveWorkflows(unittest.TestCase):
             # Opt-in retains visualization output as well as the final network.
             run([ROOT / 'workflows/crosslinking/crosslinking.py', '--project', 'with_trajectory',
                 '--total-atoms', '500', '--activation-count', '1', '--platform', 'CPU',
-                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2',
+                '--compression-steps', '2', '--equilibration-steps', '2', '--cycles', '1', '--nvt-steps', '2', '--npt-steps', '2', '--final-relaxation-steps', '2', '--final-md-steps', '2', '--pre-reaction-sampling-steps', '0', '--reference-npt-steps', '0',
                 '--max-reactions-per-cycle', '1', '--reaction-cutoff', '10', '--max-reaction-cutoff', '10',
                 '--minimization-iterations', '100', '--save-trajectory',
                 '--template-cache', network.parent / 'reaction_templates'], project)

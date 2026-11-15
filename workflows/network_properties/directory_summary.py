@@ -76,6 +76,8 @@ def _project(root, project):
         if type(cfg['replicates']) is not int or cfg['replicates'] < 1:
             raise ValueError('replicates must be a positive integer')
         check_run_signature(project, cfg)
+        from workflows.network_properties.network_properties import refresh_cooling_fits
+        refresh_cooling_fits(project, cfg)
         ids, properties = collect_replicas(project, cfg)
         completed = sum(replica_complete(project, cfg, i) for i in range(1, cfg['replicates'] + 1))
         available = any(p['n_available'] for p in properties.values())

@@ -38,16 +38,24 @@ def plot_tg(base, dry=None, path=None):
             bins = sorted(fit['bins'], key=lambda r: r['temperature_K'])
             ax.plot([b['temperature_K'] for b in bins], convert([b['density_g_cm3'] for b in bins]),
                     'o', ms=3.5, c='tab:blue', label='cooling, 10 K bin mean')
+            from workflows.thermomechanical.analysis import hyperbola_slope, smooth_hyperbola
             tg, width = fit['tg_K'], fit['transition_width_K']
-            slope_glass, slope_rubber = fit['density_slope_glass_g_cm3_K'], fit['density_slope_rubber_g_cm3_K']
-            change = slope_rubber - slope_glass
-            rho0 = fit['density_at_tg_g_cm3'] - .5 * change * width
+            if 'fit_parameters' in fit:
+                q = fit['fit_parameters']
+                params = (q['rho0_g_cm3'], q['tg_K'], q['slope_glass_g_cm3_K'], q['slope_change_g_cm3_K'], q['width_K'])
+            else:  # results before fit version 2 stored the asymptotic slopes here
+                glass, rubber = fit['density_slope_glass_g_cm3_K'], fit['density_slope_rubber_g_cm3_K']
+                params = (fit['density_at_tg_g_cm3'] - .5 * (rubber - glass) * width, tg, glass, rubber - glass, width)
             grid = np.linspace(t.min(), t.max(), 400)
-            x = grid - tg
-            curve = rho0 + slope_glass * x + .5 * change * (x + np.sqrt(x * x + width * width))
-            ax.plot(grid, convert(curve), c='black', lw=1.2, label='fit')
-            for slope, style, name in ((slope_glass, ':', 'glass asymptote'), (slope_rubber, '--', 'rubber asymptote')):
-                ax.plot(grid, convert(fit['density_at_tg_g_cm3'] + slope * x), c='gray', ls=style, lw=.8, label=name)
+            ax.plot(grid, convert(smooth_hyperbola(grid, *params)), c='black', lw=1.2, label='fit')
+            if 'cte_glass_temperature_K' in fit:
+                # Tangents of the fitted curve where the CTEs are taken.
+                for at, style, name in ((fit['cte_glass_temperature_K'], ':', 'glass CTE tangent'),
+                                        (fit['cte_rubber_temperature_K'], '--', 'rubber CTE tangent')):
+                    near = np.linspace(at - 60., at + 60., 50)
+                    at_rho = float(smooth_hyperbola(np.asarray([at]), *params)[0])
+                    ax.plot(near, convert(at_rho + float(hyperbola_slope(at, *params)) * (near - at)),
+                            c='gray', ls=style, lw=1., label=f'{name} ({at:.0f} K)')
             ax.axvline(tg, c='tab:red', ls='--', lw=1, label=f'Tg {tg:.0f} K')
         if heating:
             ax.plot([h['temperature_K'] for h in heating], convert([h['final_density_g_cm3'] for h in heating]),

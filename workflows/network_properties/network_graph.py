@@ -5,8 +5,11 @@ heavy atom) with each small-ring system (fused 3- to 8-membered rings)
 contracted to one node, so an aromatic core in a chain is a pass-through,
 not a set of branch points.
 
-1. Gel: molecules that wrap onto their own periodic image. Everything else
-   is the sol (unreacted monomer and unattached oligomers).
+1. Gel: molecules that wrap onto their own periodic image (periodic
+   dimension >= 1). Everything else is the sol (unreacted monomer and
+   unattached oligomers). The mass in each periodic dimension (rank of the
+   lattice periods: 1 string, 2 sheet, 3 network) is reported as well, so the
+   stricter 3-dimensional gel criterion comes from the same pass.
 2. Dangling material: pieces of the gel attached through a single bond
    (a bridge) that lead to no infinite (winding) part, pruned repeatedly.
 3. Active network: the rest. Junctions are its nodes with three or more
@@ -27,6 +30,7 @@ for the rubbery state above Tg.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from functools import lru_cache
 import json
 from pathlib import Path
 
@@ -38,25 +42,26 @@ KB = 1.380649e-23
 METHOD_VERSION = 2
 
 
+@lru_cache(maxsize=None)
+def _periodicity():
+    """workflows/crosslinking/periodicity.py, loaded by path so this file also runs as a script."""
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / 'crosslinking' / 'periodicity.py'
+    spec = importlib.util.spec_from_file_location('crosslinking_periodicity', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _lifts(nodes, edges, start):
-    """Integer cell offsets of nodes reached from start, and whether a cycle winds.
+    """Integer cell offsets of nodes reached from start, and the periodic dimension met.
 
     edges: node -> [(other, shift)] where shift is the cell offset of other
-    seen from node across that edge.
+    seen from node across that edge. The dimension is the rank of the lattice
+    periods (workflows/crosslinking/periodicity.py): 0 finite, 1 string, 2 sheet, 3 network.
     """
-    lift, winding, pending = {start: np.zeros(3, dtype=int)}, False, [start]
-    while pending:
-        i = pending.pop()
-        for j, shift in edges[i]:
-            if j not in nodes:
-                continue
-            expected = lift[i] + shift
-            if j not in lift:
-                lift[j] = expected
-                pending.append(j)
-            elif (expected != lift[j]).any():
-                winding = True
-    return lift, winding
+    lift, basis = _periodicity().walk(nodes, edges, start)
+    return lift, len(basis)
 
 
 def _bridges(adjacency):
@@ -217,6 +222,7 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
     sol_mass = dangling_mass = active_mass = loop_mass = 0.
     junction_degrees, strand_lengths, strand_masses, backbone_bonds = Counter(), [], [], []
     strands = loops = gel_molecules = 0
+    dimension_mass, dimension_molecules = np.zeros(4), [0] * 4
     offset = 0
     for gi, graph in enumerate(graphs):
         n = len(graph['atoms'])
@@ -236,6 +242,7 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
             bonds.append((i, j, -np.rint((local_xyz[j] - local_xyz[i]) @ inverse).astype(int)))
         if not heavy:
             sol_mass += local_mass.sum()
+            dimension_mass[0] += local_mass.sum(); dimension_molecules[0] += 1
             continue
         # Contract ring systems; unwrap each system relative to its root.
         def shift_of(i, j):
@@ -264,8 +271,9 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
             edge_shift[k] = (a, b, s)
         for node in members:
             adjacency[node]
-        _, winds = _lifts(set(members), edges, root(heavy[0]))
-        if not winds:
+        _, dimension = _lifts(set(members), edges, root(heavy[0]))
+        dimension_mass[dimension] += local_mass.sum(); dimension_molecules[dimension] += 1
+        if not dimension:
             sol_mass += local_mass.sum()
             continue
         gel_molecules += 1
@@ -287,7 +295,7 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
         for k, (a, b, s) in edge_shift.items():
             if k not in bridge_ids:
                 inner[a].append((b, s)); inner[b].append((a, -s))
-        winding = [_lifts(set(nodes), inner, nodes[0])[1] for nodes in comps]
+        winding = [_lifts(set(nodes), inner, nodes[0])[1] > 0 for nodes in comps]
         # Prune non-winding leaves of the bridge tree: dangling material.
         tree = defaultdict(set)
         for k in bridge_ids:
@@ -380,7 +388,8 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
     polar = polar_groups(graphs)
     per_volume = 1 / NA / volume_m3 / 1000       # count -> mmol/cm^3 (= mol/L)
     return dict(
-        definitions='heavy-atom graph, fused 3-8 rings contracted; gel = periodically winding molecules; '
+        definitions='heavy-atom graph, fused 3-8 rings contracted; gel = periodically winding molecules '
+                    '(periodic dimension >= 1; dimension = rank of the lattice periods); '
                     'dangling = pieces behind a bridge with no winding part; loops are removed before counting; '
                     'junction = active node with >= 3 active bonds after that; Mc_g_mol = total cell mass / strands; '
                     'Mc_active_network_g_mol = active network mass / strands; '
@@ -389,6 +398,9 @@ def network_structure(graphs, positions_nm, box_nm, temperature_K=300., details=
         volume_nm3=volume_m3 * 1e27, density_g_cm3=density_kg_m3 / 1000,
         gel_molecules=gel_molecules,
         sol_mass_fraction=float(sol_mass / total_mass),
+        mass_fraction_by_periodic_dimension={str(d): float(dimension_mass[d] / total_mass) for d in range(4)},
+        molecules_by_periodic_dimension={str(d): dimension_molecules[d] for d in range(4)},
+        three_dimensional_gel_mass_fraction=float(dimension_mass[3] / total_mass),
         dangling_mass_fraction=float(dangling_mass / total_mass),
         loop_mass_fraction=float(loop_mass / total_mass),
         active_mass_fraction=float(active_mass / total_mass),

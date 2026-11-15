@@ -74,7 +74,8 @@ def configure(args):
         options.update(cycles=0, target_conversion=None)
     if args.smoke:
         options.update(compression_steps=2, equilibration_steps=2, cycles=1, nvt_steps=2, npt_steps=2, template_workers=1,
-            final_relaxation_steps=2, final_md_steps=2,
+            final_relaxation_steps=2, final_md_steps=2, pre_reaction_sampling_steps=4, pre_reaction_frame_steps=2,
+            reference_npt_steps=4, reference_frame_steps=1,
             max_reactions_per_cycle=1, reaction_cutoff=10., max_reaction_cutoff=10.,
             minimization_iterations=100)
         if overrides['total_atoms'] is None:
@@ -232,8 +233,12 @@ def ensure_network(project, cfg, replica, lock=None):
         activation_count=settings.get('activation_count'),
         cycles_completed=metrics['cycles_completed'],
         epoxide_consumption_including_activation=metrics['epoxide_consumption_including_activation'],
-        **{key: metrics[key] for key in ('sol_mass_fraction', 'sol_monomers_removed', 'sol_oligomers_removed',
-                                         'sol_atoms_removed') if key in metrics})
+        **{key: metrics[key] for key in ('pre_reaction_epoxides', 'reference_before_crosslinking', 'kinetic_chains',
+                                         'volume_before_crosslinking_nm3', 'activation_density_nm3',
+                                         'activation_density_mmol_cm3',
+                                         'sol_mass_fraction', 'sol_monomers_removed', 'sol_oligomers_removed',
+                                         'sol_atoms_removed', 'gel_initial_epoxide_sites',
+                                         'gel_reacted_epoxide_sites', 'gel_epoxide_conversion') if key in metrics})
     write_json(base / 'network_origin.json', record)
     write_json(marker, record)
     return source

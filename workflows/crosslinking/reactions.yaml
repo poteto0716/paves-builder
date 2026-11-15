@@ -26,9 +26,9 @@ reactions:
       1: null
       3: cationic_activity
     require_explicit_hydrogens: true
-    # angstrom。crosslinking.pyは5 Åから開始し、0件が2 cycle続くと1.2倍、最大10 Å。
+    # angstrom。crosslinking.pyはこの値を--reaction-cutoff（既定4 Å）で上書きし、0件が2 cycle続くと1.2倍、最大6 Å。
     # 自動拡大はPython側の設定。距離は反応障壁から求めた値ではない。
-    distance_cutoff: 5.0
+    distance_cutoff: 4.0
     # 現在同じconnected component内の反応も許す（分岐・閉ループ）。
     allow_intramolecular: true
     # 同じcomponent内では距離アンカー間に少なくとも4結合必要。

@@ -21,6 +21,40 @@ from workflows.network_properties.mechanical import isotropic_moduli, stress, co
 from workflows.network_properties.network_properties import DEFAULTS, main, report, temperature_grid, validate
 
 
+class CoolingRefitTests(unittest.TestCase):
+    def test_report_refits_an_older_cooling_result_from_the_trace(self):
+        import csv
+        from workflows.network_properties.network_properties import COOLING_FIT_VERSION, refresh_cooling
+        from workflows.thermomechanical.analysis import smooth_hyperbola
+        temperature = np.repeat(np.arange(800., 99., -20.), 25)
+        density = smooth_hyperbola(temperature, 1.10, 450., -1.5e-4, -3e-4, 300.)
+        density = density + np.random.default_rng(50).normal(0, .008, len(temperature))
+        cfg = dict(DEFAULTS, replicates=1)
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp) / 'replica_01'
+            base.mkdir()
+            with (base / 'cooling.csv').open('w', newline='') as handle:
+                writer = csv.writer(handle)
+                writer.writerow(['target_temperature_K', 'density_g_cm3', 'volume_nm3'])
+                writer.writerows((t, d, 20. / d) for t, d in zip(temperature, density))
+            # An old result: asymptotic slopes, a negative glass CTE, no fit version.
+            old = dict(smoke=False, npt={}, thermal_history_density=dict(possible_vaporization=False, phases=[]),
+                       cooling=dict(tg_K=430., alpha_linear_glass_1_K=-2e-6, fit_checks_passed=False))
+            (base / 'dry_result.json').write_text(json.dumps(old))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(refresh_cooling(base, cfg))
+            fit = json.loads((base / 'dry_result.json').read_text())['cooling']
+            self.assertEqual((fit['fit_version'], fit['cte_offset_K']), (COOLING_FIT_VERSION, 50.))
+            self.assertGreater(fit['alpha_linear_glass_1_K'], 0)
+            self.assertAlmostEqual(fit['cte_glass_temperature_K'], fit['tg_K'] - 50)
+            self.assertTrue((base / 'tg_density_volume.png').is_file())
+            # Current results are left alone; a changed offset refits again.
+            self.assertFalse(refresh_cooling(base, cfg))
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(refresh_cooling(base, dict(cfg, cte_offset_K=30.)))
+            self.assertEqual(json.loads((base / 'dry_result.json').read_text())['cooling']['cte_offset_K'], 30.)
+
+
 class ThermodynamicsTests(unittest.TestCase):
     def test_fluctuation_units_and_thermodynamic_identity(self):
         # Orthogonal +/- fluctuations have an exactly specified covariance.
@@ -212,6 +246,9 @@ class NetworkGraphTests(unittest.TestCase):
         self.assertEqual(r['junction_functionality'], {6: 8})
         self.assertEqual((r['effective_strands'], r['elastically_ineffective_loops']), (24, 1))
         self.assertAlmostEqual(r['sol_mass_fraction'], 2 / total)
+        # The grid winds along x, y and z: a three-dimensional gel; the dimer is finite.
+        self.assertEqual(r['molecules_by_periodic_dimension'], {'0': 1, '1': 0, '2': 0, '3': 1})
+        self.assertAlmostEqual(r['three_dimensional_gel_mass_fraction'], 74 / total)
         self.assertAlmostEqual(r['dangling_mass_fraction'], 9 / total)
         self.assertAlmostEqual(r['loop_mass_fraction'], 9 / total)
         self.assertAlmostEqual(r['active_mass_fraction'], 56 / total)
@@ -261,6 +298,16 @@ class NetworkGraphTests(unittest.TestCase):
         self.assertAlmostEqual(r['Mc_g_mol'], 538.)
         self.assertAlmostEqual(r['Mc_active_network_g_mol'], 28.)
         self.assertAlmostEqual(r['strand_molecular_weight_g_mol']['mean'], 24.)
+
+    def test_diagonal_string_is_gel_but_not_three_dimensional(self):
+        from workflows.network_properties.network_graph import network_structure
+        string = dict(atoms=[dict(atomic_number=6, mass=12., aromatic=False)] * 4,
+                      bonds=[[0, 1, 1], [1, 2, 1], [2, 3, 1], [3, 0, 1]])
+        xyz = np.array([[.1, .1, .1], [.35, .35, .35], [.6, .6, .6], [.85, .85, .85]])
+        r = network_structure([string], xyz, np.eye(3))
+        self.assertEqual(r['gel_molecules'], 1)
+        self.assertEqual(r['molecules_by_periodic_dimension'], {'0': 0, '1': 1, '2': 0, '3': 0})
+        self.assertEqual((r['sol_mass_fraction'], r['three_dimensional_gel_mass_fraction']), (0., 0.))
 
     def test_finite_molecules_are_sol(self):
         from workflows.network_properties.network_graph import network_structure
@@ -388,7 +435,8 @@ class ConfigurationTests(unittest.TestCase):
         spanning = topology(graphs,np.array([[.1,0,0],[.43,0,0],[.76,0,0]]),np.eye(3))
         finite = topology(graphs,np.array([[.1,0,0],[.2,0,0],[.3,0,0]]),np.eye(3))
         self.assertTrue(spanning['percolates_periodically'])
-        self.assertEqual(spanning['components'][0]['periodic_winding_axes'],[True,False,False])
+        self.assertEqual(spanning['components'][0]['periodic_dimension'],1)
+        self.assertEqual(finite['components'][0]['periodic_dimension'],0)
         self.assertFalse(finite['percolates_periodically'])
         self.assertEqual(spanning['graph_cycle_rank'],1)
 

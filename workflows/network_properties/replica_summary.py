@@ -103,10 +103,37 @@ def collect(project, cfg):
         if cfg.get('input_mode') == 'epoxy':
             source = base / 'network_origin.json'
             build = _read(source)
-            for key, label in (('conversion', 'Crosslink conversion'),
-                    ('epoxide_consumption_including_activation', 'Ring consumption including activation')):
-                add(replica, source, build, 'Network construction', f'crosslinking.{key}', label, '1',
-                    _at(build, key), _at(build, 'target_reached'))
+            rows = [('conversion', 'Crosslink conversion', '1'),
+                    ('epoxide_consumption_including_activation', 'Ring consumption including activation', '1'),
+                    ('activation_density_nm3', 'Initial activations per volume (before crosslinking)', 'nm^-3')]
+            rows += [('reference_before_crosslinking.volume_nm3', 'Cell volume before reaction (reference temperature, default 300 K)', 'nm^3'),
+                     ('kinetic_chains.number_average_epoxide_units',
+                      'Kinetic chain length per active end, number average', 'epoxide units'),
+                     ('kinetic_chains.weight_average_epoxide_units',
+                      'Kinetic chain length per active end, weight average', 'epoxide units'),
+                     ('kinetic_chains.dispersity', 'Kinetic chain length dispersity', '1'),
+                     ('kinetic_chains.max_epoxide_units', 'Longest kinetic chain', 'epoxide units')]
+            if cfg.get('crosslinking', {}).get('remove_sol_fraction'):
+                rows.append(('gel_epoxide_conversion', 'Ring conversion of the gel (sol removed)', '1'))
+            for key, label, unit in rows:
+                add(replica, source, build, 'Network construction', f'crosslinking.{key}', label, unit,
+                    _at(build, *key.split('.')), _at(build, 'target_reached'))
+            # Equilibrium before any reaction, at the reaction temperature (crosslinking pre_reaction/).
+            pre = _at(build, 'pre_reaction_epoxides')
+            cutoffs = [f'{c:g}' for c in (_at(pre, 'contact_cutoffs_A') or [])]
+            group = f"Pre-reaction equilibrium ({_at(pre, 'temperature_K') or 0:g} K)" if pre else 'Pre-reaction equilibrium'
+            pre_rows = [(('epoxide_number_density_nm3', 'mean'), 'Epoxide number density', 'nm^-3')]
+            for cut in cutoffs:
+                pre_rows += [(('by_cutoff_A', cut, 'coordination_number', 'mean'), f'Epoxide coordination number ({cut} A)', '1'),
+                             (('by_cutoff_A', cut, 'largest_cluster_fraction', 'mean'),
+                              f'Largest epoxide contact cluster fraction ({cut} A)', '1')]
+            pre_rows += [(('msd_final_A2',), 'Epoxide MSD at the end of sampling', 'A^2'),
+                         (('diffusion_coefficient_m2_s',), 'Epoxide diffusion coefficient', 'm^2/s'),
+                         (('msd_exponent_alpha',), 'Epoxide MSD exponent alpha', '1')]
+            if pre:
+                for path, label, unit in pre_rows:
+                    add(replica, source, build, group, 'pre_reaction.' + '.'.join(path), label, unit,
+                        _at(pre, *path), _at(build, 'target_reached'))
         source = base / 'dry_result.json'
         dry = _read(source)
         for key, label, unit in COOLING:
@@ -115,6 +142,19 @@ def collect(project, cfg):
         for key, label, unit in NPT:
             add(replica, source, dry, '300 K thermodynamics', f'npt.{key}', label, unit,
                 _at(dry, 'npt', 'estimates', key), _at(dry, 'npt', 'sampling_checks_passed'))
+        # Film retention: 300 K NPT volume after crosslinking (sol removed when requested) and the
+        # thermal history, over the cell volume when the reactions started.
+        if cfg.get('input_mode') == 'epoxy':
+            # Both volumes at 300 K and 1 atm, so thermal expansion does not enter: the reference NPT of
+            # the packed monomer before heating to the reaction temperature (crosslinking
+            # reference_volume.csv) and the dry NPT of the crosslinked network after the thermal history.
+            reference = _at(_read(base / 'network_origin.json'), 'reference_before_crosslinking')
+            start = _at(reference, 'volume_nm3') if _at(reference, 'temperature_K') == 300. else None
+            relaxed = _at(dry, 'npt', 'volume_nm3_mean')
+            add(replica, source, dry, '300 K structure', 'structure.film_retention_volume_ratio',
+                'Film retention, V(300 K, crosslinked) / V(300 K, before reaction)', '1',
+                relaxed / start if isinstance(relaxed, Real) and isinstance(start, Real) and start > 0 else None,
+                _at(dry, 'npt', 'sampling_checks_passed'))
         add(replica, source, dry, '300 K structure', 'structure.point_probe_void_fraction',
             'Point-probe void fraction (300 K)', '1',
             _at(dry, 'structure', 'point_probe_void_fraction'),
@@ -137,6 +177,7 @@ def collect(project, cfg):
                 (('dangling_mass_fraction',), 'Dangling mass fraction', '1'),
                 (('loop_mass_fraction',), 'Loop mass fraction', '1'),
                 (('sol_mass_fraction',), 'Sol mass fraction', '1'),
+                (('three_dimensional_gel_mass_fraction',), 'Three-dimensional gel mass fraction', '1'),
                 (('rubbery_shear_modulus_estimates_MPa', 'affine'), 'Rubbery G estimate, affine (300 K)', 'MPa'),
                 (('rubbery_shear_modulus_estimates_MPa', 'phantom'), 'Rubbery G estimate, phantom (300 K)', 'MPa'),
                 (('polar_groups_mmol_cm3', 'aliphatic_OH'), 'Aliphatic OH', 'mmol/cm^3'),

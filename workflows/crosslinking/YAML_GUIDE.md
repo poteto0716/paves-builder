@@ -268,8 +268,8 @@ state条件はSMARTS条件と同時に判定されます。
 反応cutoffとOpenMM nonbonded cutoffは別の設定です。
 探索範囲は平衡結合長や反応障壁ではありません。
 値を小さくすると候補が減り、反応には接近を待つMDが必要になる場合があります。
-crosslinking.pyはCLIの開始距離（既定5 Å）でYAMLの距離を上書きし、0件が2 cycle続くと
-次cycleから1.2倍、最大10 Åまで自動拡大します。`--fixed-reaction-cutoff`で拡大を無効化できます。
+crosslinking.pyはCLIの開始距離（既定4 Å）でYAMLの距離を上書きし、0件が2 cycle続くと
+次cycleから1.2倍、最大6 Åまで自動拡大します。`--fixed-reaction-cutoff`で拡大を無効化できます。
 
 conversionは、この例ではrunnerを作った時点（初期化後）の適格な未開環epoxideに対する成長時の消費割合です。
 初期OH化されたepoxideはその分母に入りません。
@@ -290,7 +290,7 @@ cycleの反応数上限はCLIで上書きできます。
 | reactionsのtop-level `selection` | `ReactiveMDRunner(..., selector=rules.selection)` | YAMLのselection（現在nearest） |
 | reactionsのtop-level `seed` | `ReactiveMDRunner(..., seed=seed)` | Python変数seed=31415 |
 | 各ruleの `max_reactions_per_cycle` | CLIの`--max-reactions-per-cycle` | 指定時はルール／全体上限を上書き。省略時はYAML |
-| 各ruleの `distance_cutoff` | CLIの`--reaction-cutoff`と自動拡大条件 | 開始距離はCLI（既定5 Å）。既定では0件が2 cycle続くと1.2倍、最大10 Å |
+| 各ruleの `distance_cutoff` | CLIの`--reaction-cutoff`と自動拡大条件 | 開始距離はCLI（既定4 Å）。既定では0件が2 cycle続くと1.2倍、最大6 Å |
 
 反応後の電荷・力場の割り当て方式はYAMLではなくPython/CLIで指定します。
 crosslinking.pyの既定は`--reaction-assignment local_templates`です。

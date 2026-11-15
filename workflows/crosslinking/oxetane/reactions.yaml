@@ -20,7 +20,7 @@ reactions:
       1: null
       3: cationic_activity
     require_explicit_hydrogens: true
-    distance_cutoff: 5.0
+    distance_cutoff: 4.0
     allow_intramolecular: true
     minimum_graph_separation: 4
     max_reactions_per_cycle: 1

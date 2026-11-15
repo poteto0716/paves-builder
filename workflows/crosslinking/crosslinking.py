@@ -5,22 +5,26 @@
 開始点0（--activation-count 0または--activation-fraction 0）なら反応cycleを省き、
 packと緩和だけの未反応モノマー構造を保存する。
 
-packing後の加圧NPT: 300 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
-初期NPT: 300 K、1 atm、1 fs × 1,000,000 step = 1 ns。
+温度は既定で反応温度363.15 K（90 ℃、--temperature）に統一する。
+packing後の加圧NPT: 363.15 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
+初期NPT: 363.15 K、1 atm、1 fs × 1,000,000 step = 1 ns。
+反応前sampling: 同じ条件で100 ps続け、1 psごとに未反応環の数密度・配位数・
+接触グラフの最大クラスター分率・MSDを集計する（pre_reaction/、--pre-reaction-sampling-steps 0で省略）。
 
-各cycle: 反応 → opt → NVT (300 K, 0.1 fs, 10000 step)
-                    → NPT (300 K, 1 atm, 1 fs, 1000 step)。
+各cycle: 反応 → opt → NVT (363.15 K, 0.1 fs, 10000 step)
+                    → NPT (363.15 K, 1 atm, 1 fs, 1000 step)。
 反応後の緩和は--relaxation-stages（JSON文字列かJSON/YAMLファイル）で任意の段に置き換えられる。
 OpenMMはCUDA/mixedが既定。CPUでは --platform CPU を指定する。
 OH*は中性graphにcationic_activityを付けた既存のproxy表現。
 OVITO軌跡とcycle別構造は既定では保存しない。--save-trajectoryで有効にする。
 保存先はカレントのresults/<project>。既存projectの上書きは --force が必要。
 activation.yaml／reactions.yamlはカレントディレクトリから読み込む。
-反応距離は5 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大7 Å（--max-reaction-cutoff）。
+反応距離は4 Åから開始。反応0件が2 cycle続くと1.2倍に拡大し、最大6 Å（--max-reaction-cutoff）。
 反応後の割り当ては局所Sageフラグメントの電荷テンプレートを再利用する。
 """
 import argparse
 import copy
+import csv
 from contextlib import nullcontext
 from dataclasses import asdict, replace
 import json
@@ -47,44 +51,27 @@ DEFAULT_TARGET_CONVERSION = .995
 STAGE_KEYS = {'ensemble', 'steps', 'timestep', 'temperature', 'pressure_atm'}
 
 
-def periodic_winding(graph, xyz, cell):
-    """Axes along which one molecule wraps onto its own periodic image.
+def periodic_dimension(graph, xyz, cell):
+    """Periodic dimension of one molecule and a basis of its lattice periods.
 
-    Walks the bonds with minimum-image displacements; reaching an atom again at
-    a different cell offset means the molecule is infinite along that axis.
-    xyz and cell are in angstrom; cell rows are the box vectors.
+    Rank of the cell offsets met when a bond walk reaches an atom again in
+    another periodic image (periodicity.py): 0 finite, 1 string, 2 sheet,
+    3 infinite in all directions. xyz and cell are in angstrom; cell rows are the box vectors.
     """
-    import numpy as np
-    inverse = np.linalg.inv(cell)
-    neighbors = [[] for _ in graph['atoms']]
-    for i, j, _ in graph['bonds']:
-        shift = -np.rint((xyz[j] - xyz[i]) @ inverse).astype(int)
-        neighbors[i].append((j, shift))
-        neighbors[j].append((i, -shift))
-    lifts, winding = {}, np.zeros(3, dtype=bool)
-    for root in range(len(neighbors)):
-        if root in lifts:
-            continue
-        lifts[root], pending = np.zeros(3, dtype=int), [root]
-        while pending:
-            i = pending.pop()
-            for j, shift in neighbors[i]:
-                expected = lifts[i] + shift
-                if j not in lifts:
-                    lifts[j] = expected
-                    pending.append(j)
-                else:
-                    winding |= expected != lifts[j]
-    return winding.tolist()
+    module = _sibling('periodicity')
+    edges = module.bond_edges([(i, j) for i, j, _ in graph['bonds']], xyz, cell)
+    _, basis = module.walk(set(range(len(edges))), edges, 0) if edges else (None, [])
+    return len(basis), [b.tolist() for b in basis]
 
 
 def without_sol(structure, origin):
-    """Copy of structure keeping only molecules that percolate through the cell.
+    """Copy of structure keeping only molecules whose periodic dimension is 3.
 
     Development dissolves every finite molecule: unreacted monomers and
     oligomers not attached to the infinite network (the sol fraction). A
-    molecule is kept when it wraps onto its own periodic image along at least
-    one axis. origin maps stable_atom_id -> index of the initial (activated)
+    molecule is kept when its lattice periods (cell offsets at which a bond
+    walk meets an atom's own periodic image) span three dimensions; strings and
+    sheets, including a string wound diagonally through x, y and z, are removed. origin maps stable_atom_id -> index of the initial (activated)
     monomer, to report removed monomers and oligomers separately.
     Returns (structure or None when nothing percolates, summary dict).
     """
@@ -92,12 +79,13 @@ def without_sol(structure, origin):
     xyz, cell = np.asarray(structure._positions), np.asarray(structure.box_vectors)
     offsets = np.cumsum([0] + [len(g['atoms']) for g in structure.graphs])
     masses = [sum(a['mass'] for a in g['atoms']) for g in structure.graphs]
-    keep, axes, monomers, oligomers = [], [], 0, 0
+    keep, periods, dimensions, monomers, oligomers = [], [], [], 0, 0
     for i, graph in enumerate(structure.graphs):
-        winding = periodic_winding(graph, xyz[offsets[i]:offsets[i + 1]], cell)
-        if any(winding):
+        dimension, basis = periodic_dimension(graph, xyz[offsets[i]:offsets[i + 1]], cell)
+        dimensions.append(dimension)
+        if dimension == 3:
             keep.append(i)
-            axes.append(winding)
+            periods.append(basis)
         elif len({origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}) == 1:
             monomers += 1
         else:
@@ -106,7 +94,9 @@ def without_sol(structure, origin):
     summary = dict(sol_monomers_removed=monomers, sol_oligomers_removed=oligomers,
                    sol_atoms_removed=structure.n_atoms - kept_atoms,
                    sol_mass_fraction=1 - sum(masses[i] for i in keep) / sum(masses),
-                   network_molecules_kept=len(keep), network_winding_axes=axes, final_total_atoms=kept_atoms)
+                   network_molecules_kept=len(keep), network_period_vectors=periods,
+                   molecules_by_periodic_dimension={d: dimensions.count(d) for d in range(4)},
+                   final_total_atoms=kept_atoms)
     if not keep:
         return None, summary
     trimmed = copy.copy(structure)
@@ -194,6 +184,109 @@ def activation_yaml_with_selection(text, *, count=None, fraction=None):
     return ''.join(lines[:first] + body + lines[end:])
 
 
+def gel_site_conversion(gel, origin, remaining_sites, sites_per_molecule):
+    """Ring conversion of the kept gel, counted against its own original rings.
+
+    The gel's original rings are sites_per_molecule for every monomer
+    (origin index) that ended up in it; a ring is unreacted when all atoms of
+    a remaining site (stable_atom_id tuples from the reaction tracker) are in
+    the gel. Rings opened by activation count as reacted.
+    """
+    kept = {a['stable_atom_id'] for g in gel.graphs for a in g['atoms']}
+    initial = sites_per_molecule * len({origin[sid] for sid in kept if sid in origin})
+    remaining = sum(1 for site in remaining_sites if kept.issuperset(site))
+    return dict(gel_initial_epoxide_sites=initial, gel_unreacted_epoxide_sites=remaining,
+                gel_reacted_epoxide_sites=initial - remaining,
+                gel_epoxide_conversion=(initial - remaining) / initial if initial else 0.)
+
+
+def remaining_conversion_sites(tracker):
+    """Unreacted sites of every rule's conversion reactant (stable_atom_id tuples)."""
+    roles = {name: rule['conversion_reactant'] for name, rule in tracker.to_dict()['per_rule'].items()}
+    return {site for name, role in roles.items() for site in tracker.current[name][role]}
+
+
+def _sibling(name):
+    """Load a module next to this script (it also runs as workflows.crosslinking.crosslinking)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(f'crosslinking_{name}', Path(__file__).with_name(f'{name}.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def reference_volume(runner, output, *, steps, frame_steps, timestep, temperature, pressure_atm):
+    """反応前の基準温度（既定300 K）・1 atmのNPTを回し、後半のセル体積の平均を返す（nm^3）。
+
+    残膜率の分母に使う。frame_stepsごとの体積をCSVに保存する。最後の区間はrunner経由で回し、
+    graph座標・boxを同期してエネルギーを検証する。
+    """
+    import numpy as np
+    from openmm import unit
+    simulation = runner.simulation
+    stage = MDStage('NPT', steps=frame_steps, timestep=timestep, temperature=temperature,
+                    pressure=pressure_atm * 1.01325)
+    rows = []
+
+    def frame():
+        state = simulation.context.getState()
+        rows.append(dict(time_ps=state.getTime().value_in_unit(unit.picosecond),
+                         volume_nm3=state.getPeriodicBoxVolume().value_in_unit(unit.nanometer ** 3)))
+
+    frames = steps // frame_steps
+    runner.equilibrate([stage])  # 温度・圧力・刻みをこの段の値にする
+    frame()
+    for _ in range(frames - 2):
+        simulation.step(frame_steps)
+        frame()
+    runner.equilibrate([stage])
+    frame()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with open(output, 'w', newline='') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['time_ps', 'volume_nm3'])
+        writer.writeheader()
+        writer.writerows(rows)
+    sampled = np.array([r['volume_nm3'] for r in rows[len(rows) // 2:]])
+    return dict(temperature_K=temperature, pressure_atm=pressure_atm, steps=frames * frame_steps,
+                sampling_ps=frames * frame_steps * timestep / 1000., frames_averaged=len(sampled),
+                volume_nm3=float(sampled.mean()), volume_std_nm3=float(sampled.std()))
+
+
+def sample_pre_reaction(runner, output, *, steps, frame_steps, timestep, temperature, pressure_atm, cutoffs):
+    """反応前の平衡NPT（反応温度）をsamplingし、未反応環の数密度・配位数・最大クラスター分率・MSDを求める。
+
+    フレームはframe_stepsごと（最初のフレームは現在の状態）。最後の区間だけrunner経由で回し、
+    graph座標・boxを同期してエネルギーを検証する。座標・速度・boxはそのまま成長cycleへ引き継ぐ。
+    未反応環がなければNoneを返す。
+    """
+    from openmm import unit
+    module = _sibling('pre_reaction')
+    simulation = runner.simulation
+    order = tuple(simulation._paves_stable_atom_ids)
+    groups = module.epoxide_groups(runner.engine.graph, remaining_conversion_sites(runner.engine.tracker), order)
+    if not groups:
+        return None
+    masses = [simulation.system.getParticleMass(i).value_in_unit(unit.dalton) for i in range(len(order))]
+    sampler = module.EpoxideSampler(groups, masses, cutoffs)
+
+    def frame():
+        state = simulation.context.getState(getPositions=True)
+        sampler.add(state.getPositions(asNumpy=True).value_in_unit(unit.nanometer) * 10.,
+                    state.getPeriodicBoxVectors(asNumpy=True).value_in_unit(unit.nanometer) * 10.,
+                    state.getTime().value_in_unit(unit.picosecond))
+
+    frames = steps // frame_steps
+    frame()
+    for _ in range(frames - 1):
+        simulation.step(frame_steps)
+        frame()
+    runner.equilibrate([MDStage('NPT', steps=frame_steps, timestep=timestep, temperature=temperature,
+                                pressure=pressure_atm * 1.01325)])
+    frame()
+    return sampler.summary(output, temperature_K=temperature, pressure_atm=pressure_atm,
+                           sampling_ps=frames * frame_steps * timestep / 1000.)
+
+
 def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_site,
               count=None, fraction=None, mode=DEFAULT_ATOM_COUNT_MODE):
     """Resolve whole molecules including activation atoms in the final budget."""
@@ -239,12 +332,13 @@ def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_
 def run(project, *, force=False, compression_steps=50_000, compression_pressure_mpa=200.,
         equilibration_steps=1_000_000, smiles=DEFAULT_SMILES, total_atoms=DEFAULT_TOTAL_ATOMS,
         atom_count_mode=DEFAULT_ATOM_COUNT_MODE, density=.5, activation_count=None, activation_fraction=None,
-        platform='CUDA', cycles=DEFAULT_CYCLES, temperature=300.,
-        equilibration_timestep=1.,
+        platform='CUDA', cycles=DEFAULT_CYCLES, temperature=363.15,
+        equilibration_timestep=1., pre_reaction_sampling_steps=100_000, pre_reaction_frame_steps=1000,
+        reference_temperature=300., reference_npt_steps=200_000, reference_frame_steps=1000,
         nvt_timestep=.1, nvt_steps=10000, npt_timestep=1., npt_steps=1000,
         pressure_atm=1., minimization_iterations=2000,
         target_conversion=DEFAULT_TARGET_CONVERSION, max_reactions_per_cycle=None, seed=31415,
-        reaction_cutoff=5., max_reaction_cutoff=7., cutoff_growth_factor=1.2,
+        reaction_cutoff=4., max_reaction_cutoff=6., cutoff_growth_factor=1.2,
         cutoff_zero_cycles=2, fixed_reaction_cutoff=False,
         relaxation_stages=None, post_reaction_md_steps=0, stop_after_idle_cycles=200,
         reaction_minimization_radius=12., final_relaxation_steps=1000, final_md_steps=1_000_000,
@@ -268,13 +362,20 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
       0なら加圧しない。compression_pressure_mpa: 加圧NPTの圧力 MPa（既定200）。
       packing直後のvoidを潰すため、初期NPTより前に実行する。
     equilibration_steps: 初期NPTのstep数（既定1,000,000）。既定1 fsで1 ns。
+    temperature: 反応温度 K（既定363.15 = 90 ℃）。packing、加圧・初期NPT、成長cycle、最終緩和もこの温度。
+    reference_temperature／reference_npt_steps: 加圧NPTの後、反応温度へ上げる前に基準温度（既定300 K）・
+      1 atmでNPTを回し（既定200,000 step = 200 ps、0で省略）、reference_frame_steps（既定1000）ごとの
+      体積の後半平均を反応前の基準体積volume_before_crosslinking_300K_nm3として記録する（残膜率の分母）。
+    pre_reaction_sampling_steps: 初期NPTの後、反応前に同じ温度・1 atmで続けるNPT samplingのstep数
+      （既定100,000 = 1 fs刻みで100 ps、0で省略）。pre_reaction_frame_stepsごと（既定1000 = 1 ps）に
+      未反応環の数密度・配位数・接触グラフの最大クラスター分率・MSDを集計し、pre_reaction/に保存する。
     packing → 開始点作成 → opt → 加圧NPT → 初期NPT緩和 → 成長cycle。
     各cycleは反応探索／graph更新／Sage再割当／opt → NVT → NPT。
     cycles: 最大反応サイクル数（既定5000）。target_conversion到達時は早期終了する。
     反応候補がなくても両MDを続け、次cycleで近接を再探索する。
     開始点数／割合は引数を省略するとactivation.yamlを使用する。
     max_reactions_per_cycleを指定するとYAMLのルール上限もその値へ上書きする。
-    reaction_cutoff: Å。YAMLの距離を上書きし、既定5 Åから始める。
+    reaction_cutoff: Å。YAMLの距離を上書きし、既定4 Åから始める。
     反応0件がcutoff_zero_cycles回連続すると次cycleからcutoff_growth_factor倍。
     max_reaction_cutoffで頭打ち。固定距離ならfixed_reaction_cutoff=True。
     遠い対を無理に結合させると歪んだ構造になりやすいので、長いrunでは上限を5〜6 Åに下げる。
@@ -301,7 +402,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     require_reaction_templates=Trueなら、成長cycle中の未知templateを計算せずエラー。
     target_conversionは0〜1（既定0.995）、Noneならcyclesまで。
     save_trajectory: TrueならOVITO軌跡とcycle別構造も保存する（既定False）。
-    remove_sol_fraction: Trueなら現像を模して、周期境界をまたいで無限につながった網目だけを
+    remove_sol_fraction: Trueなら現像を模して、周期次元3（周期ベクトルの階数3）の網目だけを
       最終構造に残し、未反応モノマーとオリゴマー（ゾル分）を削除する（既定False）。
       削除前はfinal_with_sol.*に残す。抜けた体積はこのスクリプトでは緩和しない。
     最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
@@ -355,6 +456,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     for name, value, minimum in (('cycles', cycles, 0),
                                  ('minimization_iterations', minimization_iterations, 0),
                                  ('compression_steps', compression_steps, 0),
+                                 ('pre_reaction_sampling_steps', pre_reaction_sampling_steps, 0),
+                                 ('pre_reaction_frame_steps', pre_reaction_frame_steps, 1),
+                                 ('reference_npt_steps', reference_npt_steps, 0),
+                                 ('reference_frame_steps', reference_frame_steps, 1),
                                  ('post_reaction_md_steps', post_reaction_md_steps, 0),
                                  ('stop_after_idle_cycles', stop_after_idle_cycles, 0),
                                  ('template_workers', template_workers, 1),
@@ -365,6 +470,11 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             raise ValueError(f'{name} must be an integer >= {minimum}')
     if target_conversion is not None and not 0 <= target_conversion <= 1:
         raise ValueError('target_conversion must be between 0 and 1')
+    if 0 < reference_npt_steps < 4 * reference_frame_steps:
+        raise ValueError('reference_npt_steps must be 0 or at least four frames (4 x reference_frame_steps)')
+    _number(reference_temperature, 'reference_temperature')
+    if 0 < pre_reaction_sampling_steps < 2 * pre_reaction_frame_steps:
+        raise ValueError('pre_reaction_sampling_steps must be 0 or at least two frames (2 x pre_reaction_frame_steps)')
     molecule = Chem.MolFromSmiles(smiles)
     if molecule is None or len(Chem.GetMolFrags(molecule)) != 1:
         raise ValueError('smiles must describe one connected molecule')
@@ -502,6 +612,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     compression=asdict(compression) if compression else None,
                     compression_pressure_MPa=compression_pressure_mpa if compression else None,
                     equilibration=asdict(equilibration),
+                    reference_temperature_K=reference_temperature, reference_npt_steps=reference_npt_steps,
+                    reference_frame_steps=reference_frame_steps,
+                    pre_reaction_sampling_steps=pre_reaction_sampling_steps,
+                    pre_reaction_frame_steps=pre_reaction_frame_steps,
                     cycle_md_stages=[asdict(stage) for stage in stages], cycles=cycles,
                     relaxation_stages=relaxation_stages, post_reaction_md_steps=post_reaction_md_steps,
                     stop_after_idle_cycles=stop_after_idle_cycles, template_workers=template_workers,
@@ -533,8 +647,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                     reactive_atom_ids=reactive_atom_ids(), **metadata)
                 trajectory.flush()
 
+        start = {}
+
         def save_summary(active):
-            metrics = {**active.metrics, 'frames': trajectory.num_frames if trajectory is not None else 0,
+            metrics = {**active.metrics, **start, 'frames': trajectory.num_frames if trajectory is not None else 0,
                        'initiated_sites': plan['activation_count'],
                        'initial_epoxide_sites': plan['initial_epoxide_sites'],
                        'epoxide_consumption_including_activation':
@@ -556,8 +672,40 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
 
         write_frame(runner, phase='initial')
         # 初期緩和中は成長反応を実行しない。座標・速度・boxを成長へ引き継ぐ。
-        runner.equilibrate([compression, equilibration] if compression else [equilibration])
+        if compression:
+            runner.equilibrate([compression])
+        if reference_npt_steps:
+            # 残膜率の分母: 反応前の基準温度（既定300 K）での体積。架橋後も同じ温度で比べ、熱膨張を含めない。
+            reference = reference_volume(runner, output / 'reference_volume.csv', steps=reference_npt_steps,
+                frame_steps=reference_frame_steps, timestep=equilibration_timestep,
+                temperature=reference_temperature, pressure_atm=pressure_atm)
+            start.update(reference_before_crosslinking=reference,
+                         **{f'volume_before_crosslinking_{reference_temperature:g}K_nm3': reference['volume_nm3']})
+            print(f"Reference volume before crosslinking at {reference_temperature:g} K: "
+                  f"{reference['volume_nm3']:.3f} nm^3 (mean of the last {reference['frames_averaged']} frames)",
+                  flush=True)
+        runner.equilibrate([equilibration])
+        if pre_reaction_sampling_steps >= 2 * pre_reaction_frame_steps:
+            # 反応前の平衡状態（反応温度・1 atm）での未反応環の統計。反応はまだ起こさない。
+            equilibrium = sample_pre_reaction(runner, output / 'pre_reaction', steps=pre_reaction_sampling_steps,
+                frame_steps=pre_reaction_frame_steps, timestep=equilibration_timestep, temperature=temperature,
+                pressure_atm=pressure_atm,
+                cutoffs=[reaction_cutoff] if fixed_reaction_cutoff else [reaction_cutoff, max_reaction_cutoff])
+            if equilibrium is not None:
+                start['pre_reaction_epoxides'] = {k: v for k, v in equilibrium.items() if k != 'definitions'}
+                cut = f'{reaction_cutoff:g}'
+                print(f"Pre-reaction equilibrium at {temperature:g} K: {equilibrium['epoxides']} rings, "
+                      f"{equilibrium['epoxide_number_density_nm3']['mean']:.3f} nm^-3, coordination "
+                      f"{equilibrium['by_cutoff_A'][cut]['coordination_number']['mean']:.2f} and largest cluster "
+                      f"{equilibrium['by_cutoff_A'][cut]['largest_cluster_fraction']['mean']:.3f} within {cut} A, "
+                      f"MSD {equilibrium['msd_final_A2']:.2f} A^2 over {equilibrium['msd_final_lag_ps']:g} ps", flush=True)
         runner.structure.write_json(output / 'before_reaction.structure.json')
+        # 架橋開始直前（初期NPT・反応前samplingの後）の体積あたりの開始点数。1 nm^-3 = 1/0.6022 mmol/cm^3。
+        import numpy as np
+        volume_nm3 = abs(float(np.linalg.det(np.asarray(runner.structure.box_vectors)))) / 1000.
+        start.update(volume_before_crosslinking_nm3=volume_nm3,
+                     activation_density_nm3=plan['activation_count'] / volume_nm3,
+                     activation_density_mmol_cm3=plan['activation_count'] / volume_nm3 / .60221408)
         write_frame(runner, phase='equilibrated')
         save_summary(runner)
 
@@ -594,19 +742,34 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             runner.equilibrate(final_stages)
             write_frame(runner, phase='final relaxed')
         metrics = save_summary(runner)
+        # 活性末端1個あたりの連鎖長（開始点で開いた環 + その末端の成長反応数）と分布。
+        chains = _sibling('chains').write_chain_lengths(
+            output, state=activation_rule.reaction_state_to_assign or 'cationic_activity')
+        metrics['kinetic_chains'] = {k: v for k, v in chains.items() if k != 'definition'}
+        (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
+        if chains.get('active_ends'):
+            print(f"Kinetic chains: {chains['active_ends']} active ends, number/weight average "
+                  f"{chains['number_average_epoxide_units']:.2f}/{chains['weight_average_epoxide_units']:.2f} "
+                  f"epoxide units, max {chains['max_epoxide_units']}", flush=True)
         final = runner.structure
         if remove_sol_fraction:
             # 削除前の構造も残す。抜けた体積は後続のNPT（network_propertiesの熱履歴など）で緩和する。
             save_structure(runner, output / 'final_with_sol')
             final, sol = without_sol(final, origin)
             metrics.update(sol)
+            if final is not None:
+                # 残したゲルだけで数えた反応率（開始点で開いた環も反応済に含む）。
+                metrics.update(gel_site_conversion(final, origin, remaining_conversion_sites(runner.engine.tracker),
+                                                   sites_per_molecule))
             (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
             if final is None:
-                raise RuntimeError('No molecule percolates through the cell (below the gel point): '
+                raise RuntimeError('No molecule percolates in three dimensions (below the gel point): '
                                    'the whole film would dissolve. See final_with_sol.structure.json')
             print(f"Removed the sol fraction: {sol['sol_monomers_removed']} monomers and "
                   f"{sol['sol_oligomers_removed']} oligomers ({sol['sol_atoms_removed']} atoms, "
-                  f"{100 * sol['sol_mass_fraction']:.1f} wt%); {final.n_atoms} atoms remain", flush=True)
+                  f"{100 * sol['sol_mass_fraction']:.1f} wt%); {final.n_atoms} atoms remain; gel ring conversion "
+                  f"{metrics['gel_reacted_epoxide_sites']}/{metrics['gel_initial_epoxide_sites']} "
+                  f"= {metrics['gel_epoxide_conversion']:.4f}", flush=True)
         save_structure(SimpleNamespace(structure=final), output / 'final')
         # 環を貫通した結合は伸びたまま残り、後続の固定トポロジーMDの結合長検査で停止する。
         from polypaves.ring_piercing import ring_piercing_bonds
@@ -644,7 +807,8 @@ def main():
     parser.add_argument('--platform', choices=('CUDA', 'CPU'), default='CUDA')
     parser.add_argument('--cycles', type=int, default=DEFAULT_CYCLES,
                         help='最大反応サイクル数（既定5000）')
-    parser.add_argument('--temperature', type=float, default=300.)
+    parser.add_argument('--temperature', type=float, default=363.15,
+                        help='反応温度 K（既定363.15 = 90 ℃）。packing・初期NPT・成長cycle・最終緩和に使う')
     parser.add_argument('--compression-steps', type=int, default=50_000,
                         help='packing後の加圧NPTのstep数（既定50000）。既定1 fs刻みで50 ps、0で無効')
     parser.add_argument('--compression-pressure-mpa', type=float, default=200.,
@@ -652,6 +816,16 @@ def main():
     parser.add_argument('--equilibration-steps', type=int, default=1_000_000,
                         help='初期NPTのstep数（既定1000000）。既定1 fs刻みで1 ns')
     parser.add_argument('--equilibration-timestep', type=float, default=1.)
+    parser.add_argument('--reference-temperature', type=float, default=300.,
+                        help='反応前の基準体積を測る温度 K（既定300、残膜率の分母）')
+    parser.add_argument('--reference-npt-steps', type=int, default=200_000,
+                        help='加圧後、反応温度へ上げる前の基準温度NPTのstep数（既定200000 = 200 ps、0で省略）')
+    parser.add_argument('--reference-frame-steps', type=int, default=1000,
+                        help='基準温度NPTの体積を記録する間隔step数（既定1000 = 1 ps、後半を平均）')
+    parser.add_argument('--pre-reaction-sampling-steps', type=int, default=100_000,
+                        help='初期NPT後、反応前の平衡NPT samplingのstep数（既定100000 = 100 ps、0で省略）')
+    parser.add_argument('--pre-reaction-frame-steps', type=int, default=1000,
+                        help='反応前samplingのフレーム間隔step数（既定1000 = 1 ps）')
     parser.add_argument('--nvt-timestep', type=float, default=.1)
     parser.add_argument('--nvt-steps', type=int, default=10000)
     parser.add_argument('--npt-timestep', type=float, default=1.)
@@ -662,8 +836,8 @@ def main():
                         help='目標反応率0〜1（既定0.995 = 99.5%%）')
     parser.add_argument('--max-reactions-per-cycle', type=int, help='1 cycleの最大反応数。指定時はYAMLのルール上限も上書き')
     parser.add_argument('--reaction-cutoff', type=float,
-                        help='開始時の反応探索距離 Å（YAMLを上書き、既定5。上限より大きければ上限）')
-    parser.add_argument('--max-reaction-cutoff', type=float, default=7., help='探索距離の上限 Å（既定7）')
+                        help='開始時の反応探索距離 Å（YAMLを上書き、既定4。上限より大きければ上限）')
+    parser.add_argument('--max-reaction-cutoff', type=float, default=6., help='探索距離の上限 Å（既定6）')
     parser.add_argument('--cutoff-growth-factor', type=float, default=1.2, help='0件が続いた際の距離倍率（既定1.2）')
     parser.add_argument('--cutoff-zero-cycles', type=int, default=2, help='距離拡大までの連続0件cycle数（既定2）')
     parser.add_argument('--fixed-reaction-cutoff', action='store_true', help='距離をreaction-cutoffに固定し、自動拡大を無効化')
@@ -692,13 +866,13 @@ def main():
     parser.add_argument('--require-reaction-templates', action='store_true', help='成長cycle中の未知templateを計算せずエラーにする')
     parser.add_argument('--seed', type=int, default=31415)
     parser.add_argument('--remove-sol-fraction', action='store_true',
-                        help='現像を模して、周期境界をまたいでつながった網目だけを残し、未反応モノマーとオリゴマーを削除する')
+                        help='現像を模して、周期次元3（3次元に無限につながった）網目だけを残し、未反応モノマーとオリゴマーを削除する')
     parser.add_argument('--log-interval', type=float, default=10.)
     args = vars(parser.parse_args())
     smiles_file = args.pop('smiles_file')
     args['smiles'] = smiles_file.read_text().strip() if smiles_file else args['smiles'] or DEFAULT_SMILES
     if args['reaction_cutoff'] is None:
-        args['reaction_cutoff'] = min(5., args['max_reaction_cutoff'])
+        args['reaction_cutoff'] = min(4., args['max_reaction_cutoff'])
     p.configure_logging(progress_interval=args.pop('log_interval'))
     run(**args)
 

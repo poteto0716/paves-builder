@@ -7,6 +7,8 @@
 既存のPCFF鎖構築用`thermomechanical.py`とは別の入力経路です。
 周期境界をまたぐ架橋を有限分子MOL2として再importしません。
 
+計算する物性の一覧と、それぞれの意味・求め方は[PROPERTIES.md](PROPERTIES.md)にまとめています。
+
 ## 実行
 
 架橋構築と同じ[Python 3.11 / OpenFF環境](../crosslinking/environment.yml)と
@@ -39,10 +41,20 @@ SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別�
 作成済みのproject.jsonにもすべての設定を記録します。
 架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
 トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
-`--remove-sol-fraction`で、現像を模して周期境界をまたいでつながった網目だけを残し、
+`--remove-sol-fraction`で、現像を模して周期次元3（周期ベクトルの階数3、3次元に無限につながった）網目だけを残し、
 未反応モノマーと網目につながっていないオリゴマー（ゾル分）を除いた構造を物性評価に使います
-（既定OFF。抜けた体積は熱履歴の昇温NPTで緩和。ゾル分率と削除数は`network_origin.json`に記録。
+（既定OFF。抜けた体積は熱履歴の昇温NPTで緩和。ゾル分率と削除数、ゲルだけで数えたエポキシ反応率`gel_epoxide_conversion`
+（ゲル中の反応済エポキシ／ゲルのモノマーがもともと持っていたエポキシ）は`network_origin.json`に記録。
 ゲル化点に達していなければそのレプリカは停止）。
+架橋は既定で90 ℃（363.15 K）で行います。初期NPTの後、反応前に同じ温度で100 ps samplingし、
+未反応エポキシの数密度・配位数・接触グラフの最大クラスター分率・MSD（`crosslinking/README.md`参照）を
+物性サマリーの「Pre-reaction equilibrium」に出します。
+架橋開始直前（初期NPT・反応前samplingの後）の体積で開始点数を割った体積あたりの初期activation数
+`activation_density_nm3`も`network_origin.json`と物性サマリーに出力します。
+残膜率`structure.film_retention_volume_ratio`は、熱履歴後の300 K乾燥NPT観測の平均体積／反応前の300 Kでの体積です。
+分母は、加圧NPTの後・90 ℃へ上げる前に300 K・1 atmで200 ps回したNPTの後半平均です（`reference_before_crosslinking`）。
+両方とも300 Kなので熱膨張は入りません（`--remove-sol-fraction`なら分子はゾル削除後のゲルの体積）。
+活性末端1個あたりの連鎖長（数平均・重量平均・分散度・最長）も物性サマリーに出します（`crosslinking/README.md`参照）。
 packing（既定0.5 g/cm³、`--packing-density`。PAVESの局所緩和あり、環を貫通する結合があれば停止）後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
 `--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
 `--smiles`（旧名`--epoxy-smiles`も可）、`--total-atoms`、`--target-conversion`、`--cycles`、
@@ -71,7 +83,7 @@ python workflows/network_properties/network_properties.py new workflows/network_
 packing、加圧、1 atmの緩和、最終MDだけを行った未反応モノマーの構造から、同じ熱履歴と物性評価を行います。
 目標反応率は適用されないので、そのレプリカも集計のチェック対象に入ります。
 反応点のない分子（環を持たない液体など）も開始点0なら計算できます。
-反応距離の上限は`--max-reaction-cutoff`（既定7 Å）で変えられます。
+反応距離の上限は`--max-reaction-cutoff`（既定6 Å、開始距離の既定は4 Å）で変えられます。
 開始距離は`--reaction-cutoff`、距離の固定は`--fixed-reaction-cutoff`です。
 反応後の緩和は`--reaction-minimization-iterations`、`--reaction-minimization-radius`（反応点から何Å以内を最小化するか。既定12、0で系全体）、`--post-reaction-md-steps`、
 `--relaxation-stages`（JSON文字列かJSON/YAMLファイル）で設定します。
@@ -212,14 +224,14 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 | 初期緩和と加熱 | 最小化、300 Kから100 K刻みで加熱、各100 ps |
 | 高温緩和 | 800 K、NPT、1 ns |
 | 冷却 | **800→100 K**、20 K刻み、各500 ps、平均40 K/ns |
-| 冷却解析 | 各温度plateauの後半を使用。密度の双曲線フィットからTg、線・体積CTE |
+| 冷却解析 | 各温度plateauの後半を使用。密度の双曲線フィットからTg、線・体積CTE（フィット曲線のTg∓50 Kでの傾き） |
 | 温度復帰 | 100→300 K、20 K刻み、各100 ps |
 | 300 K再緩和 | NPT、1 ns |
 | 乾燥NPT観測 | 300 K、1 atm、10 ns、1 ps間隔 |
 | 乾燥NVT観測 | 冷却・復帰後の固定セルで1 ns再緩和、10 ns観測 |
 | 独立seed | 既定では架橋構築から独立した4レプリカ。保存構造入力時は共通トポロジー |
 
-熱履歴の終了時に`replica_XX/tg_density_volume.png`を書きます。冷却中の温度–密度・温度–体積（サンプルと10 K平均）、Tgフィット曲線とガラス・ゴム側の漸近線、Tg、昇温各段階の終了時の密度・体積を1枚に描きます。昇温中の点が冷却曲線から大きく外れていれば、高温での沸騰・空洞化を疑ってください（`report`でも既存の結果から作り直し、report.mdに載せます）。
+熱履歴の終了時に`replica_XX/tg_density_volume.png`を書きます。冷却中の温度–密度・温度–体積（サンプルと10 K平均）、Tgフィット曲線と、CTEを取るTg∓50 Kでの接線、Tg、昇温各段階の終了時の密度・体積を1枚に描きます。昇温中の点が冷却曲線から大きく外れていれば、高温での沸騰・空洞化を疑ってください（`report`でも既存の結果から作り直し、report.mdに載せます）。
 
 冷却は温度plateauを使う段階冷却です。800 Kにも観測用plateauを置くため、
 冷却区間の合計は既定18 nsです（800→100 Kの温度差に対応する分は17.5 ns）。
@@ -265,6 +277,11 @@ RadonPyと同じ熱力学的揺らぎ関係を使う出力は次の通りです�
 Hは`U + K + Pext V`です。体積CTEの共分散には配置エンタルピー`U + Pext V`を使います。NPTでは運動量が配置・体積と独立でCov(V, K) = 0のため期待値は同じで、Kを含めると雑音だけが増えます（2026-11-12以前はKを含めていたため、短い観測でCTEが負になりやすかった）。比熱は古典・拘束付きSageモデルの値で、量子補正は行いません。
 5ブロックの誤差、体積・エネルギーの有効サンプル数と前後半drift、
 replica間の標本SDとSEMを出力します。1 replicaだけの場合、replica間誤差はnullです。
+ガラス・ゴムの線CTEは、双曲線フィットの漸近線ではなく、フィット曲線そのもののTg−50 K／Tg+50 Kでの傾きから
+αL = −(dρ/dT)/(3ρ(T)) で求めます（`cte_offset_K`、既定50 K）。漸近線は遷移幅が広いとデータ範囲外への外挿になり、
+曲線がどこでも右下がりなのにガラス側が負のCTEになることがありました。Tg±50 Kが冷却範囲の外ならフィットのチェックは不合格です。
+遷移幅wが広いとガラス側にゴム側の傾きが混ざります（混ざる割合`cte_mixing_fraction` = (1 − 50/√(50²+w²))/2）。
+既存の結果は`report`／`collect`の時に`cooling.csv`から再フィットし、`dry_result.json`とTg図を更新します（MDの再実行は不要）。
 Tgは冷却速度依存の見かけ値です。フィットのR²、遷移幅、端への張り付き、
 単純な直線よりAICが十分改善するかも確認します。
 

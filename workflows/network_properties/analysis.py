@@ -118,45 +118,35 @@ def analyze_nvt(rows, mass_Da, temperature_K=300., min_effective_samples=100):
 
 
 def topology(graphs, positions_nm, box_nm):
-    """Connected components and periodic winding of minimum-image bond cycles."""
+    """Connected components and their periodic dimension (rank of the lattice periods).
+
+    0 finite, 1 string, 2 sheet, 3 infinite in all directions; see
+    workflows/crosslinking/periodicity.py.
+    """
+    from workflows.network_properties.network_graph import _periodicity
+    periodic_components = _periodicity().components
     xyz = np.asarray(positions_nm)
-    inverse = np.linalg.inv(box_nm)
-    adjacent, masses, offset, edges = [[] for _ in xyz], [], 0, 0
+    bonds, masses, offset = [], [], 0
     for graph in graphs:
         masses.extend(float(a['mass']) for a in graph['atoms'])
-        for bond in graph['bonds']:
-            i, j = int(bond[0])+offset, int(bond[1])+offset
-            shift = -np.rint((xyz[j]-xyz[i]) @ inverse).astype(int)
-            adjacent[i].append((j,shift))
-            adjacent[j].append((i,-shift))
-            edges += 1
+        bonds.extend((int(b[0]) + offset, int(b[1]) + offset) for b in graph['bonds'])
         offset += len(graph['atoms'])
     if offset != len(xyz):
         raise ValueError('graph atom count does not match coordinates')
-    lifts, components = {}, []
-    for root in range(len(xyz)):
-        if root in lifts:
-            continue
-        lifts[root] = np.zeros(3,dtype=int)
-        pending, nodes, winding = [root], [], np.zeros(3,dtype=bool)
-        while pending:
-            i = pending.pop()
-            nodes.append(i)
-            for j,shift in adjacent[i]:
-                expected = lifts[i]+shift
-                if j not in lifts:
-                    lifts[j] = expected
-                    pending.append(j)
-                else:
-                    winding |= expected != lifts[j]
-        components.append(dict(atoms=len(nodes), mass_Da=float(np.asarray(masses)[nodes].sum()),
-                               periodic_winding_axes=winding.tolist()))
-    components.sort(key=lambda c:c['mass_Da'],reverse=True)
-    return dict(atoms=len(xyz), bonds=edges, connected_components=len(components),
-        largest_component_mass_fraction=components[0]['mass_Da']/sum(masses),
-        graph_cycle_rank=edges-len(xyz)+len(components), components=components,
-        percolates_periodically=any(any(c['periodic_winding_axes']) for c in components),
-        limitation='Periodic winding assumes every bond uses its minimum-image displacement.')
+    masses = np.asarray(masses)
+    components = [dict(atoms=len(nodes), mass_Da=float(masses[nodes].sum()), periodic_dimension=dimension,
+                       period_vectors=periods)
+                  for nodes, dimension, periods in periodic_components(bonds, xyz, box_nm)]
+    components.sort(key=lambda c: c['mass_Da'], reverse=True)
+    return dict(atoms=len(xyz), bonds=len(bonds), connected_components=len(components),
+        largest_component_mass_fraction=components[0]['mass_Da']/masses.sum(),
+        graph_cycle_rank=len(bonds)-len(xyz)+len(components), components=components,
+        percolates_periodically=any(c['periodic_dimension'] >= 1 for c in components),
+        percolates_in_three_dimensions=any(c['periodic_dimension'] == 3 for c in components),
+        mass_fraction_by_periodic_dimension={str(d): float(sum(c['mass_Da'] for c in components
+                                                              if c['periodic_dimension'] == d) / masses.sum())
+                                             for d in range(4)},
+        limitation='Periodicity assumes every bond uses its minimum-image displacement.')
 
 
 def diffusion(time_ps, coordinates_nm, min_duration_ps=1000.):

@@ -36,12 +36,23 @@ def bin_curve(temperature, values, width_K=10.0):
     return np.asarray(out, float)
 
 
-def fit_tg(temperature, density, bin_width_K=10.0):
+def hyperbola_slope(temperature, rho0, tg, slope_glass, slope_change, width):
+    """d(rho)/dT of smooth_hyperbola: the fitted curve's own slope at a temperature."""
+    x = np.asarray(temperature, float) - tg
+    return slope_glass + 0.5 * slope_change * (1 + x / np.sqrt(x * x + width * width))
+
+
+def fit_tg(temperature, density, bin_width_K=10.0, cte_offset_K=50.0):
     """Fit density versus temperature and return Tg and linear CTEs.
 
     Density normally decreases with temperature and its high-temperature
-    slope is more negative.  The linear CTE follows directly from the fitted
-    density slope: alpha_L = -(1/(3 rho)) d(rho)/dT.
+    slope is more negative.  The linear CTEs use the fitted curve's own slope
+    at Tg - cte_offset_K (glass) and Tg + cte_offset_K (rubber):
+    alpha_L = -(1/(3 rho(T))) d(rho)/dT at that T.  The asymptotic slopes are
+    not used: when the fitted transition is broad they are extrapolations far
+    outside the data and can even change sign.  With a broad transition the
+    two slopes also mix: glass = m_g + f dm, rubber = m_g + (1 - f) dm with
+    f = (1 - offset / sqrt(offset^2 + width^2)) / 2 (cte_mixing_fraction).
     """
     from scipy.optimize import least_squares
 
@@ -83,15 +94,27 @@ def fit_tg(temperature, density, bin_width_K=10.0):
     ss_tot = float(np.sum((rho - np.mean(rho)) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot else None
     rho_tg = float(smooth_hyperbola(np.asarray([tg]), *result.x)[0])
-    alpha_glass = -mg / (3.0 * rho_tg)
-    alpha_rubber = -(mg + dmh) / (3.0 * rho_tg)
+    t_glass, t_rubber = tg - cte_offset_K, tg + cte_offset_K
+    slope_glass = float(hyperbola_slope(t_glass, *result.x))
+    slope_rubber = float(hyperbola_slope(t_rubber, *result.x))
+    rho_glass = float(smooth_hyperbola(np.asarray([t_glass]), *result.x)[0])
+    rho_rubber = float(smooth_hyperbola(np.asarray([t_rubber]), *result.x)[0])
     return {
         'tg_K': tg,
         'density_at_tg_g_cm3': rho_tg,
-        'density_slope_glass_g_cm3_K': mg,
-        'density_slope_rubber_g_cm3_K': mg + dmh,
-        'alpha_linear_glass_1_K': alpha_glass,
-        'alpha_linear_rubber_1_K': alpha_rubber,
+        'cte_method': f'fitted-curve slope at Tg -/+ {cte_offset_K:g} K',
+        'cte_glass_temperature_K': t_glass,
+        'cte_rubber_temperature_K': t_rubber,
+        'cte_temperatures_within_data': bool(t.min() <= t_glass and t_rubber <= t.max()),
+        'cte_mixing_fraction': 0.5 * (1 - cte_offset_K / math.sqrt(cte_offset_K ** 2 + width ** 2)),
+        'density_slope_glass_g_cm3_K': slope_glass,
+        'density_slope_rubber_g_cm3_K': slope_rubber,
+        'alpha_linear_glass_1_K': -slope_glass / (3.0 * rho_glass),
+        'alpha_linear_rubber_1_K': -slope_rubber / (3.0 * rho_rubber),
+        'density_asymptote_slope_glass_g_cm3_K': mg,
+        'density_asymptote_slope_rubber_g_cm3_K': mg + dmh,
+        'fit_parameters': {'rho0_g_cm3': rho0, 'tg_K': tg, 'slope_glass_g_cm3_K': mg,
+                           'slope_change_g_cm3_K': dmh, 'width_K': width},
         'transition_width_K': width,
         'r_squared': r2,
         'rmse_g_cm3': math.sqrt(ss_res / len(rho)),

@@ -161,14 +161,22 @@ python thermomechanical.py run projects/smoke
 
 低温側の漸近勾配は \(m_g\)、高温側は \(m_g+\Delta m\) です。\(T_g\) は丸めた折れ曲がりの
 中心、`transition_width_K` は丸みの幅です。等方的なアモルファス材料を仮定し、各領域の
-線膨張係数を
+線膨張係数を、フィットした曲線そのものの傾きから
 
 \[
-\alpha_L=-\frac{1}{3\rho(T_g)}\frac{d\rho}{dT}
+\alpha_L(T)=-\frac{1}{3\rho(T)}\left.\frac{d\rho}{dT}\right|_{T}
 \]
 
-で求めます。低温側を `alpha_linear_glass_1_K`、高温側を
-`alpha_linear_rubber_1_K` として出力します。
+で求めます。ガラス側は \(T=T_g-50\) K、ゴム側は \(T=T_g+50\) K で評価し、
+`alpha_linear_glass_1_K`、`alpha_linear_rubber_1_K` として出力します（評価温度は
+`cte_glass_temperature_K`／`cte_rubber_temperature_K`）。
+漸近線の傾き \(m_g\)、\(m_g+\Delta m\) は使いません（`density_asymptote_slope_*`として記録のみ）。
+遷移幅が広いと漸近線はデータ範囲外への外挿になり、曲線がどこでも右下がりなのに
+\(m_g>0\)（負のCTE）になることがあるためです。
+遷移幅 \(w\) が50 Kに近いか大きいと、ガラス側の傾きにゴム側が混ざります:
+ガラス側 = \(m_g+f\Delta m\)、ゴム側 = \(m_g+(1-f)\Delta m\)、
+\(f=\tfrac12(1-50/\sqrt{50^2+w^2})\)（`cte_mixing_fraction`）。
+\(T_g\pm50\) K が冷却範囲の外に出たかどうかを`cte_temperatures_within_data`に記録します。
 
 ## 引張応力と弾性率
 

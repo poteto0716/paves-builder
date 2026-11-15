@@ -36,7 +36,9 @@ DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=1.,
     alchemical_sampling_ps=500., standard_density_nm3=.602214076,
     mechanical=True, nvt_production_ps=10000.,
     elastic_strain=.01, elastic_equilibration_ps=200., elastic_production_ps=1000.,
-    smoke=False)
+    cte_offset_K=50., smoke=False)
+# Version of the cooling fit stored in dry_result.json; report/collect refit older ones from cooling.csv.
+COOLING_FIT_VERSION = 2
 
 
 def write_json(path, value):
@@ -91,6 +93,10 @@ def validate(cfg):
             raise ValueError(f'{key} must be finite and positive')
     if not cfg['low_K'] < 300 < cfg['high_K']:
         raise ValueError('temperature range must bracket 300 K')
+    # Projects created before cte_offset_K existed use the default.
+    offset = cfg.get('cte_offset_K', DEFAULTS['cte_offset_K'])
+    if isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset) or offset <= 0:
+        raise ValueError('cte_offset_K must be finite and positive')
     if cfg['volume_fraction'] >= .1:
         raise ValueError('volume_fraction must be < 0.1')
     if cfg['production_ps'] / cfg['sample_interval_ps'] < 20:
@@ -305,6 +311,81 @@ def nvt_properties(runner, directory, cfg, mass_Da):
     return result
 
 
+def vaporization_reason(cfg, history):
+    """Why the high-temperature density drop invalidates the run, or None."""
+    if not history.get('possible_vaporization'):
+        return None
+    return (f'density at {cfg["high_K"]:g} K fell to {history["high_to_initial_density_ratio"]:.2f} of the start '
+            '(boiling/cavitation); lower high_K (--high-temperature)')
+
+
+def cooling_fit(temperatures, densities, cfg, history):
+    """Tg/CTE fit of the cooling trace with its acceptance checks.
+
+    CTEs are the fitted curve's own slope at Tg -/+ cte_offset_K. The checks
+    also require both temperatures inside the cooled range (no extrapolation).
+    """
+    try:
+        fit = fit_tg(temperatures, densities, bin_width_K=10.,
+                     cte_offset_K=cfg.get('cte_offset_K', DEFAULTS['cte_offset_K']))
+        fit['alpha_volume_glass_1_K'] = 3 * fit['alpha_linear_glass_1_K']
+        fit['alpha_volume_rubber_1_K'] = 3 * fit['alpha_linear_rubber_1_K']
+        t = np.array([b['temperature_K'] for b in fit['bins']])
+        rho = np.array([b['density_g_cm3'] for b in fit['bins']])
+        linear_sse = np.sum((rho - np.polyval(np.polyfit(t,rho,1),t))**2)
+        curved_sse = len(t) * fit['rmse_g_cm3']**2
+        fit['AIC_improvement_over_linear'] = float(len(t)*np.log(max(linear_sse,1e-30)/max(curved_sse,1e-30))-6)
+        span = cfg['high_K'] - cfg['low_K']
+        fit['fit_checks_passed'] = bool(not cfg['smoke'] and fit['r_squared'] is not None
+            and fit['r_squared'] > .95 and fit['transition_width_K'] < span / 4
+            and fit['AIC_improvement_over_linear'] > 6 and fit['alpha_linear_glass_1_K'] > 0
+            and fit['cte_temperatures_within_data']
+            and cfg['low_K'] + .1 * span < fit['tg_K'] < cfg['high_K'] - .1 * span)
+    except (ValueError, RuntimeError) as exc:
+        fit = dict(fit_checks_passed=False, reason=str(exc))
+    reason = vaporization_reason(cfg, history)
+    if reason:
+        # Voids from boiling at high_K remain in the glass: the cooling curve is not the bulk material.
+        fit.update(fit_checks_passed=False, vaporization_warning=reason)
+    fit.update(fit_version=COOLING_FIT_VERSION, cte_offset_K=cfg.get('cte_offset_K', DEFAULTS['cte_offset_K']))
+    return fit
+
+
+def refresh_cooling(directory, cfg):
+    """Refit an older cooling result from cooling.csv, rewrite dry_result.json and the Tg figure.
+
+    report/collect call this, so finished runs get the current CTE definition
+    without rerunning MD. Returns True when the result was updated.
+    """
+    directory = Path(directory)
+    source, trace = directory / 'dry_result.json', directory / 'cooling.csv'
+    if not source.is_file() or not trace.is_file():
+        return False
+    dry = json.loads(source.read_text())
+    offset = cfg.get('cte_offset_K', DEFAULTS['cte_offset_K'])
+    current = dry.get('cooling', {})
+    if current.get('fit_version') == COOLING_FIT_VERSION and current.get('cte_offset_K') == offset:
+        return False
+    with trace.open() as handle:
+        rows = list(csv.DictReader(handle))
+    dry['cooling'] = cooling_fit([float(r['target_temperature_K']) for r in rows],
+                                 [float(r['density_g_cm3']) for r in rows], cfg,
+                                 dry.get('thermal_history_density') or {})
+    write_json(source, dry)
+    try:
+        from workflows.network_properties.plots import plot_tg
+        plot_tg(directory, dry)
+    except Exception as exc:  # a figure must never fail the report
+        print(f'WARNING: Tg figure not rewritten for {directory.name}: {exc}', flush=True)
+    print(f'{directory.name}: cooling fit updated to version {COOLING_FIT_VERSION} '
+          f'(CTE at Tg -/+ {offset:g} K)', flush=True)
+    return True
+
+
+def refresh_cooling_fits(project, cfg):
+    return [refresh_cooling(Path(project) / f'replica_{i:02d}', cfg) for i in range(1, cfg['replicates'] + 1)]
+
+
 def dry_properties(project, cfg, replica):
     from openmm import unit
     from polypaves.sorption import load_network
@@ -352,24 +433,10 @@ def dry_properties(project, cfg, replica):
         result = dict(smoke=cfg['smoke'], thermal_history=f'{cfg["high_K"]:g} -> {cfg["low_K"]:g} -> 300 K; fixed topology',
             thermal_history_density=history_densities(directory),
             npt=analyze_npt(rows, mass, 300., cfg['pressure_atm'], cfg['min_effective_samples']))
-        try:
-            result['cooling'] = fit_tg([r['target_temperature_K'] for r in cooling],
-                                      [r['density_g_cm3'] for r in cooling], bin_width_K=10.)
-            result['cooling']['alpha_volume_glass_1_K'] = 3 * result['cooling']['alpha_linear_glass_1_K']
-            result['cooling']['alpha_volume_rubber_1_K'] = 3 * result['cooling']['alpha_linear_rubber_1_K']
-            fit = result['cooling']
-            t = np.array([b['temperature_K'] for b in fit['bins']])
-            rho = np.array([b['density_g_cm3'] for b in fit['bins']])
-            linear_sse = np.sum((rho - np.polyval(np.polyfit(t,rho,1),t))**2)
-            curved_sse = len(t) * fit['rmse_g_cm3']**2
-            fit['AIC_improvement_over_linear'] = float(len(t)*np.log(max(linear_sse,1e-30)/max(curved_sse,1e-30))-6)
-            span = cfg['high_K'] - cfg['low_K']
-            fit['fit_checks_passed'] = bool(not cfg['smoke'] and fit['r_squared'] is not None
-                and fit['r_squared'] > .95 and fit['transition_width_K'] < span / 4
-                and fit['AIC_improvement_over_linear'] > 6 and fit['alpha_linear_glass_1_K'] > 0
-                and cfg['low_K'] + .1 * span < fit['tg_K'] < cfg['high_K'] - .1 * span)
-        except (ValueError, RuntimeError) as exc:
-            result['cooling'] = dict(fit_checks_passed=False, reason=str(exc))
+        result['npt']['volume_nm3_mean'] = float(np.mean([r['volume_nm3'] for r in rows]))
+        result['cooling'] = cooling_fit([r['target_temperature_K'] for r in cooling],
+                                        [r['density_g_cm3'] for r in cooling], cfg,
+                                        result['thermal_history_density'])
         snapshot = runner.snapshot()
         result['structure'] = structural_diagnostics(host, host, snapshot['positions'], snapshot['box'],
             0, seed=replica_seed(project, cfg, replica), free_volume_samples=100 if cfg['smoke'] else 10000)
@@ -377,14 +444,10 @@ def dry_properties(project, cfg, replica):
         from workflows.network_properties.network_graph import network_structure
         result['network'] = network_structure(host.graphs, snapshot['positions'], snapshot['box'])
         result['npt']['sampling_checks_passed'] &= not cfg['smoke']
-        if result['thermal_history_density']['possible_vaporization']:
+        reason = vaporization_reason(cfg, result['thermal_history_density'])
+        if reason:
             # Voids from boiling at high_K remain in the glass: neither the cooling
             # curve nor the 300 K fluctuations describe the bulk material.
-            reason = (f'density at {cfg["high_K"]:g} K fell to '
-                      f'{result["thermal_history_density"]["high_to_initial_density_ratio"]:.2f} of the start '
-                      '(boiling/cavitation); lower high_K (--high-temperature)')
-            result['cooling']['fit_checks_passed'] = False
-            result['cooling']['vaporization_warning'] = reason
             result['npt']['sampling_checks_passed'] = False
             result['npt']['vaporization_warning'] = reason
             print(f'WARNING: {reason}', flush=True)
@@ -476,6 +539,7 @@ def _report(project):
     from workflows.network_properties.replica_summary import collect, write_tables, markdown
     cfg = json.loads((project / 'project.json').read_text())
     check_run_signature(project, cfg)
+    refresh_cooling_fits(project, cfg)
     replica_ids, properties = collect(project, cfg)
     write_tables(project, replica_ids, properties)
     dry = [json.loads(path.read_text()) for path in sorted(project.glob('replica_*/dry_result.json'))]
@@ -633,9 +697,9 @@ def main(argv=None):
     create.add_argument('--compression-steps', type=int,
                         help='compression NPT steps at 1 fs (default 50000 = 50 ps; 0 disables)')
     create.add_argument('--reaction-cutoff', type=float,
-                        help='initial reaction search distance in angstrom (default 5, capped by the maximum)')
+                        help='initial reaction search distance in angstrom (default 4, capped by the maximum)')
     create.add_argument('--max-reaction-cutoff', type=float,
-                        help='largest search distance after automatic growth, angstrom (default 7)')
+                        help='largest search distance after automatic growth, angstrom (default 6)')
     create.add_argument('--fixed-reaction-cutoff', action='store_true',
                         help='keep the search distance at --reaction-cutoff')
     create.add_argument('--reaction-minimization-iterations', type=int,
@@ -652,7 +716,7 @@ def main(argv=None):
                         help='processes computing new reaction templates in parallel (default 4; 1 serial)')
     create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
     create.add_argument('--remove-sol-fraction', action='store_true',
-                        help='like development: keep only the network that percolates through the cell, '
+                        help='like development: keep only the network that percolates along all of x, y and z, '
                              'dropping unreacted monomers and unattached oligomers (default OFF)')
     create.add_argument('--activation-yaml', type=Path)
     create.add_argument('--reactions-yaml', type=Path)

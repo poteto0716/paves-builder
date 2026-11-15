@@ -23,6 +23,9 @@ python crosslinking.py --project epoxy \
 切り上げます。既定モノマー・開始点割合10%では421分子、初期化後20039原子です。
 `nearest`（最も近い原子数）、`floor`（目標以下）、`exact`（厳密一致）も明示指定できます。
 要求値と実現した原子数は`settings.json`と`metrics.json`に記録します。
+架橋開始直前（加圧・初期NPT・反応前samplingの後、最初の反応cycleの前）のセル体積`volume_before_crosslinking_nm3`と、
+それで開始点数を割った体積あたりの初期activation数`activation_density_nm3`（nm⁻³）／
+`activation_density_mmol_cm3`も`metrics.json`に記録します。
 packingではPAVESのnative局所緩和（`--pack-relax 50`、`--pack-postrelax 400`、PAVES既定と同じ）を行います。
 以前は速度のため0にしていましたが、生の成長座標では嵩高い芳香族エポキシの結合が他分子の環を貫通し
 （20000原子で約700本）、その後の最小化・MDでもほどけず、伸びた結合として最終構造まで残っていました。
@@ -37,21 +40,50 @@ packing後に環（3〜8員環）を貫通する結合が1本でもあれば停�
 以前は20000原子・開始点20%で1本残り、network_propertiesの最初のMDで結合長の検査に失敗していました。
 packingの密度は既定0.5 g/cm³（`--density`）です。0.8で詰めると、嵩高い芳香族エポキシでは原子の重なりが最小化で取り切れず、
 次の加圧NPTが4回中2回NaNで停止しました（0.5では0/4。加圧後は約1.1 g/cm³）。
-packing直後のvoidを潰すため、初期NPTの前に300 K・200 MPa・50 ps（1 fs×50000 step）の
+温度は既定で反応温度の363.15 K（90 ℃、`--temperature`）です。packing、加圧NPT、初期NPT、反応前sampling、
+各cycle、最終緩和をすべてこの温度で行います。
+packing直後のvoidを潰すため、初期NPTの前に363.15 K・200 MPa・50 ps（1 fs×50000 step）の
 加圧NPTを行います。`--compression-pressure-mpa`と`--compression-steps`で変更でき、
 `--compression-steps 0`で無効です。加圧後は座標・速度・boxをそのまま1 atmの初期NPTへ渡します。
-初期NPTは300 K・1 atm・1 ns、各cycleは最小化、0.1 fs×10000 stepのNVT、
+初期NPTは363.15 K・1 atm・1 ns、各cycleは最小化、0.1 fs×10000 stepのNVT、
 1 fs×1000 stepのNPTです。時間・温度・圧力・反応上限・距離はCLIで変更できます。
+
+### 反応前の300 K基準体積（`reference_volume.csv`）
+
+加圧NPTの後、反応温度へ上げる前に300 K・1 atmのNPTを200 ps回し（`--reference-temperature 300`、
+`--reference-npt-steps 200000`、0で省略）、1 psごと（`--reference-frame-steps 1000`）の体積の後半平均を
+`metrics.json`の`reference_before_crosslinking`／`volume_before_crosslinking_300K_nm3`に記録します。
+架橋後に300 Kで測った体積と比べる残膜率の分母です（反応温度の体積で割ると熱膨張が入るため）。
+その後、反応温度で初期NPT（1 ns）を行います。順番は packing → 加圧NPT → 300 K基準NPT → 初期NPT → 反応前sampling → 成長cycle です。
+
+### 反応前の平衡状態（`pre_reaction/`）
+
+初期NPTの後、反応を始める前に同じ温度・1 atmのNPTを100 ps続け（`--pre-reaction-sampling-steps 100000`、
+0で省略）、1 psごと（`--pre-reaction-frame-steps 1000`）に未反応のエポキシ環を集計します。
+座標・速度・boxはそのまま成長cycleへ引き継ぎます。
+
+- エポキシ数密度: 未反応環の数／セル体積（nm⁻³）。開始点として開いた環は含みません。
+- 配位数: 1つの環あたりの接触相手の平均数。接触は「一方の環のO」と「他方の環の攻撃されるCH2炭素」の距離が
+  カットオフ以内（最小イメージ、同一分子内も含む）。リレー反応1段の幾何（開いた環のOに残ったOHが次の環のCH2を攻撃）
+  に対応します。カットオフは反応の開始距離と上限（既定4 Åと6 Å、`--fixed-reaction-cutoff`なら開始距離のみ）。
+- 最大クラスター分率: 接触グラフの最大連結成分に含まれる環の数／全環数。
+- MSD: 環の重原子重心。フレーム間の最小イメージで展開し、系全体の重心ドリフトを除き、全時間原点で平均。
+  拡散係数はラグ10〜50%の範囲でMSD/6tから求め、log-log傾き`msd_exponent_alpha`も記録します
+  （1から大きく外れる場合はまだ拡散領域ではありません）。
+
+体積・数密度・配位数・最大クラスター分率は全フレームの平均と標準偏差を`pre_reaction/epoxide_equilibrium.json`に、
+フレームごとの値を`epoxide_frames.csv`に、MSDを`epoxide_msd.csv`に保存し、要約を`metrics.json`の
+`pre_reaction_epoxides`にも入れます。
 目標反応率は既定で99.5%（`--target-conversion 0.995`）、最大サイクル数は5000です。
 目標に到達すれば早期終了し、未到達でも最大5000サイクルで最終構造を保存して終了します。
 変更する場合は`--target-conversion`と`--cycles`を明示してください。
 
 ### 反応距離の上限と反応後の緩和
 
-反応探索距離は5 Åから始まり、反応0件が2 cycle続くと1.2倍に広がり、最大7 Åまで伸びます（以前の既定は10 Å。7 Åを超えて作った結合が引き伸ばされたまま残ったため下げました）。
+反応探索距離は4 Åから始まり、反応0件が2 cycle続くと1.2倍に広がり、最大6 Åまで伸びます（以前の既定は5→7 Å、さらに前は10 Å。遠い対で作った結合が引き伸ばされたまま残るため下げました）。
 遠い対を無理に結合させると、伸びた結合や環の貫通などのおかしな構造ができやすくなります。
-既定の上限は7 Åです。さらに抑える場合は`--max-reaction-cutoff 5`のように指定してください。
-開始距離（`--reaction-cutoff`）を省略すると、開始距離は5 Åと上限の小さい方になります。
+既定の上限は6 Åです。さらに抑える場合は`--max-reaction-cutoff 5`のように指定してください。
+開始距離（`--reaction-cutoff`）を省略すると、開始距離は4 Åと上限の小さい方になります。
 `--fixed-reaction-cutoff`を指定すると、距離は拡大しません。
 
 各cycleの反応後の緩和は次の順で行います。
@@ -146,14 +178,33 @@ OVITO軌跡と、各cycleの構造を保存します。
 安定原子ID、活動状態、周期セルを保存します。吸水計算にはJSONを渡します。
 周期境界をまたぐ架橋を通常の有限分子用MOL2 importで読み直さないでください。
 
+### 活性末端1個あたりの連鎖長（`chain_lengths.*`）
+
+成長反応ごとに活性（`cationic_activity`）は旧OH酸素から新しく開いた環の酸素へ移ります。この移動を
+`activation_history.jsonl`→`reaction_history.jsonl`の順にたどり、各反応をどの開始点の連鎖かに割り当てます。
+連鎖長 = 1（開始点で開いた環）+ その末端の成長反応数（エポキシ単位）です。
+数平均・重量平均・分散度・最小／中央値／最大と分布を`chain_lengths.json`と`metrics.json`の`kinetic_chains`に、
+末端ごとの値を`chain_lengths.csv`に、ヒストグラムを`chain_lengths.png`に保存します。
+これは反応の連鎖（kinetic chain）の長さで、架橋点間のストランド長（network_propertiesの`network_strands`）とは別物です。
+
 `--remove-sol-fraction`を付けると、現像を模して最終緩和の後に**ゾル分**を`final.*`から削除します。
-残すのは、周期境界をまたいで自分自身の像とつながった（少なくとも1軸方向に無限につながった）網目だけです。
+残すのは、**周期次元が3**の網目だけです。分子の結合をたどって、同じ原子の別の周期像に行き着いたら、
+その像のずれ（整数のセルオフセット）を周期ベクトルとして集めます。普通の環（同じ像に戻る）は数えません。
+集めた周期ベクトルの階数（線形独立な本数）が周期次元で、0は有限分子、1は紐、2はシート、3は3次元網目です
+（`periodicity.py`）。x・y・zの軸ごとに「抜けたか」を見る判定と違い、(1,1,1)方向に斜めに巻き付いた紐（次元1）を
+3方向貫通と誤認せず、斜めの周期だけでつながった3次元網目も正しく数えます。三斜晶セルでもそのまま使えます。
+紐・シート（次元1〜2）もゾル分として削除します。
 他の分子と結合しなかったモノマー（開始点が付いただけのものも含む）と、
 網目につながっていないオリゴマーはすべて削除します。互いに独立に貫通する網目が複数あれば、すべて残します。
 削除前の構造は`final_with_sol.*`に残し、`metrics.json`に
 `sol_monomers_removed`／`sol_oligomers_removed`／`sol_atoms_removed`、
-ゾル分率`sol_mass_fraction`（質量分率）、残した網目の貫通方向`network_winding_axes`を記録します。
-どの分子も貫通していない（ゲル化点に達していない＝膜がすべて溶ける）場合は、記録後にエラーで停止します。
+ゾル分率`sol_mass_fraction`（質量分率）、残した網目の周期ベクトルの基底`network_period_vectors`、
+周期次元ごとの分子数`molecules_by_periodic_dimension`を記録します。
+さらに、残したゲルだけで数えたエポキシ（`target_smarts`の環）の反応率
+`gel_epoxide_conversion` = `gel_reacted_epoxide_sites` / `gel_initial_epoxide_sites`を記録します。
+分母はゲルに含まれるモノマーがもともと持っていた環の数、分子はそのうち開いた環の数
+（開始点として開いた環を含む）です。削除したゾル分の環はどちらにも含めません。
+周期次元3の分子が1つもない（ゲル化点に達していない＝膜がすべて溶ける）場合は、記録後にエラーで停止します。
 抜けた体積はこのスクリプトでは緩和しないので、後でNPT緩和をしてください
 （network_propertiesでは熱履歴の昇温NPTで緩和されます）。
 ゾル分率は現像による膜減りの目安ですが、網目の膨潤・乾燥収縮や深さ方向の露光むらは含みません。
