@@ -64,7 +64,68 @@ def periodic_dimension(graph, xyz, cell):
     return len(basis), [b.tolist() for b in basis]
 
 
-def without_sol(structure, origin):
+SOL_CLASSES = ('gel', 'sol_monomer', 'sol_oligomer')
+# OVITO colors (RGB 0-1) of the classes above: kept gel blue-grey, removed monomers red, removed oligomers orange.
+SOL_COLORS = {'gel': (.55, .65, .80), 'sol_monomer': (.90, .15, .15), 'sol_oligomer': (1., .60, .05)}
+
+
+def classify_molecules(structure, origin):
+    """Per molecule: (class in SOL_CLASSES, periodic dimension, lattice period basis).
+
+    A molecule of periodic dimension 3 is gel; any other is sol, a monomer when
+    its atoms come from one initial monomer (origin: stable_atom_id -> monomer index), else an oligomer.
+    """
+    import numpy as np
+    xyz, cell = np.asarray(structure._positions), np.asarray(structure.box_vectors)
+    offsets = np.cumsum([0] + [len(g['atoms']) for g in structure.graphs])
+    result = []
+    for i, graph in enumerate(structure.graphs):
+        dimension, basis = periodic_dimension(graph, xyz[offsets[i]:offsets[i + 1]], cell)
+        if dimension == 3:
+            kind = 'gel'
+        elif len({origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}) == 1:
+            kind = 'sol_monomer'
+        else:
+            kind = 'sol_oligomer'
+        result.append((kind, dimension, basis))
+    return result
+
+
+def write_sol_ovito(structure, classes, path):
+    """Extended XYZ of the structure before sol removal, colored by what development keeps.
+
+    OVITO reads the Color column directly: gel (kept) blue-grey, removed
+    monomers red, removed oligomers orange (SOL_COLORS). Per-atom columns
+    gel (1 kept / 0 removed), sol_class (0 gel, 1 monomer, 2 oligomer),
+    periodic_dimension and molecule allow selecting, e.g. Expression selection
+    gel==0 then Delete selected shows the film after development. Positions
+    are wrapped into the cell; bonds are not stored (add them with Create bonds).
+    """
+    import numpy as np
+    cell = np.asarray(structure.box_vectors, float)
+    if cell.shape == (3,):
+        cell = np.diag(cell)
+    fractional = np.asarray(structure._positions, float) @ np.linalg.inv(cell)
+    xyz = (fractional - np.floor(fractional)) @ cell
+    lattice = ' '.join(f'{v:.8f}' for v in cell.reshape(-1))
+    counts = {k: sum(c[0] == k for c in classes) for k in SOL_CLASSES}
+    lines = [str(len(xyz)),
+             f'Lattice="{lattice}" Properties=species:S:1:pos:R:3:color:R:3:gel:I:1:sol_class:I:1:'
+             f'periodic_dimension:I:1:molecule:I:1 pbc="T T T" '
+             + ' '.join(f'{k}_molecules={v}' for k, v in counts.items())]
+    index = 0
+    for molecule, (graph, (kind, dimension, _)) in enumerate(zip(structure.graphs, classes), 1):
+        r, g, b = SOL_COLORS[kind]
+        tail = f'{r:.3f} {g:.3f} {b:.3f} {int(kind == "gel")} {SOL_CLASSES.index(kind)} {dimension} {molecule}'
+        for atom in graph['atoms']:
+            x, y, z = xyz[index]
+            lines.append(f'{atom["element"]} {x:.6f} {y:.6f} {z:.6f} {tail}')
+            index += 1
+    Path(path).write_text('\n'.join(lines) + '\n')
+    return counts
+
+
+def without_sol(structure, origin, classes=None):
     """Copy of structure keeping only molecules whose periodic dimension is 3.
 
     Development dissolves every finite molecule: unreacted monomers and
@@ -73,23 +134,20 @@ def without_sol(structure, origin):
     walk meets an atom's own periodic image) span three dimensions; strings and
     sheets, including a string wound diagonally through x, y and z, are removed. origin maps stable_atom_id -> index of the initial (activated)
     monomer, to report removed monomers and oligomers separately.
+    classes: classify_molecules(structure, origin), computed when omitted.
     Returns (structure or None when nothing percolates, summary dict).
     """
     import numpy as np
-    xyz, cell = np.asarray(structure._positions), np.asarray(structure.box_vectors)
+    xyz = np.asarray(structure._positions)
     offsets = np.cumsum([0] + [len(g['atoms']) for g in structure.graphs])
     masses = [sum(a['mass'] for a in g['atoms']) for g in structure.graphs]
-    keep, periods, dimensions, monomers, oligomers = [], [], [], 0, 0
-    for i, graph in enumerate(structure.graphs):
-        dimension, basis = periodic_dimension(graph, xyz[offsets[i]:offsets[i + 1]], cell)
-        dimensions.append(dimension)
-        if dimension == 3:
-            keep.append(i)
-            periods.append(basis)
-        elif len({origin[a['stable_atom_id']] for a in graph['atoms'] if a['stable_atom_id'] in origin}) == 1:
-            monomers += 1
-        else:
-            oligomers += 1
+    if classes is None:
+        classes = classify_molecules(structure, origin)
+    keep = [i for i, c in enumerate(classes) if c[0] == 'gel']
+    periods = [classes[i][2] for i in keep]
+    dimensions = [c[1] for c in classes]
+    monomers = sum(c[0] == 'sol_monomer' for c in classes)
+    oligomers = sum(c[0] == 'sol_oligomer' for c in classes)
     kept_atoms = int(sum(offsets[i + 1] - offsets[i] for i in keep))
     summary = dict(sol_monomers_removed=monomers, sol_oligomers_removed=oligomers,
                    sol_atoms_removed=structure.n_atoms - kept_atoms,
@@ -404,7 +462,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     save_trajectory: TrueならOVITO軌跡とcycle別構造も保存する（既定False）。
     remove_sol_fraction: Trueなら現像を模して、周期次元3（周期ベクトルの階数3）の網目だけを
       最終構造に残し、未反応モノマーとオリゴマー（ゾル分）を削除する（既定False）。
-      削除前はfinal_with_sol.*に残す。抜けた体積はこのスクリプトでは緩和しない。
+      削除前はfinal_with_sol.*に残し、残すゲルと削除する分子を色分けしたOVITO用の
+      final_with_sol_ovito.xyzも書く。抜けた体積はこのスクリプトでは緩和しない。
     最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
     戻り値はReactiveMDResult。
     """
@@ -755,7 +814,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         if remove_sol_fraction:
             # 削除前の構造も残す。抜けた体積は後続のNPT（network_propertiesの熱履歴など）で緩和する。
             save_structure(runner, output / 'final_with_sol')
-            final, sol = without_sol(final, origin)
+            classes = classify_molecules(final, origin)
+            # OVITO: 残すゲル（青灰）と削除するモノマー（赤）・オリゴマー（橙）を色分けした削除前の構造。
+            write_sol_ovito(final, classes, output / 'final_with_sol_ovito.xyz')
+            final, sol = without_sol(final, origin, classes)
             metrics.update(sol)
             if final is not None:
                 # 残したゲルだけで数えた反応率（開始点で開いた環も反応済に含む）。
@@ -764,7 +826,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
             if final is None:
                 raise RuntimeError('No molecule percolates in three dimensions (below the gel point): '
-                                   'the whole film would dissolve. See final_with_sol.structure.json')
+                                   'the whole film would dissolve. See final_with_sol.structure.json '
+                                   'and final_with_sol_ovito.xyz')
             print(f"Removed the sol fraction: {sol['sol_monomers_removed']} monomers and "
                   f"{sol['sol_oligomers_removed']} oligomers ({sol['sol_atoms_removed']} atoms, "
                   f"{100 * sol['sol_mass_fraction']:.1f} wt%); {final.n_atoms} atoms remain; gel ring conversion "

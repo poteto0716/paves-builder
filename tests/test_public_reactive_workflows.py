@@ -271,6 +271,26 @@ class PublicReactiveWorkflows(unittest.TestCase):
         self.assertEqual(len(sol['network_period_vectors'][0]), 3)
         self.assertEqual(sol['molecules_by_periodic_dimension'], {0: 3, 1: 1, 2: 0, 3: 1})
         self.assertEqual(len(structure.graphs), 5)  # the input is not modified
+        # The OVITO file colors the kept gel and the removed monomers and oligomers.
+        classes = workflow.classify_molecules(structure, origin)
+        self.assertEqual([c[:2] for c in classes], [('gel', 3), ('sol_oligomer', 1), ('sol_oligomer', 0),
+                                                    ('sol_oligomer', 0), ('sol_monomer', 0)])
+        for graph in structure.graphs:
+            for atom in graph['atoms']:
+                atom['element'] = 'C'
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / 'sol.xyz'
+            counts = workflow.write_sol_ovito(structure, classes, path)
+            lines = path.read_text().splitlines()
+        self.assertEqual(counts, dict(gel=1, sol_monomer=1, sol_oligomer=3))
+        self.assertEqual(lines[0], '22')
+        self.assertIn('color:R:3:gel:I:1:sol_class:I:1:periodic_dimension:I:1:molecule:I:1', lines[1])
+        rows = [line.split() for line in lines[2:]]
+        self.assertEqual([r[4:] for r in (rows[0], rows[10], rows[20])],
+                         [['0.550', '0.650', '0.800', '1', '0', '3', '1'],
+                          ['1.000', '0.600', '0.050', '0', '2', '1', '2'],
+                          ['0.900', '0.150', '0.150', '0', '1', '0', '5']])
+        self.assertEqual(sum(r[7] == '1' for r in rows), 10)
         # The gel holds 5 monomers (origins 0-4) with 3 rings each; two rings
         # stay closed in the gel and one in the removed column does not count.
         gel = workflow.gel_site_conversion(trimmed, origin, {('n1', 'n2', 'n3'), ('n4', 'n5', 'n6'),

@@ -196,7 +196,21 @@ OVITO軌跡と、各cycleの構造を保存します。
 紐・シート（次元1〜2）もゾル分として削除します。
 他の分子と結合しなかったモノマー（開始点が付いただけのものも含む）と、
 網目につながっていないオリゴマーはすべて削除します。互いに独立に貫通する網目が複数あれば、すべて残します。
-削除前の構造は`final_with_sol.*`に残し、`metrics.json`に
+削除前の構造は`final_with_sol.*`に残します。あわせて、**残すゲルと削除する分子を色分けした**
+OVITO用ファイル`final_with_sol_ovito.xyz`（extended XYZ、削除前の全原子）を書きます。
+OVITOで開く（File > Load File）と`Color`列がそのまま使われ、
+
+| 色 | 分類 | `sol_class` |
+|---|---|---|
+| 青灰 | 残すゲル（周期次元3） | 0 |
+| 赤 | 削除するモノマー | 1 |
+| 橙 | 削除するオリゴマー・紐・シート | 2 |
+
+で表示されます。原子ごとの列`gel`（1=残す、0=削除）、`sol_class`、`periodic_dimension`、`molecule`も入っているので、
+たとえばExpression selectionで`gel==0`を選んでDelete selectedすると現像後の膜、`gel==1`を消すと削除分だけを見られます
+（元素色に戻すにはColor coding等で上書きします）。座標はセル内に折り返し済みで、結合は含まないので
+必要ならCreate bondsで付けてください。ゲル化点に達せずエラーで停止した場合も、このファイルは書かれます。
+`metrics.json`には
 `sol_monomers_removed`／`sol_oligomers_removed`／`sol_atoms_removed`、
 ゾル分率`sol_mass_fraction`（質量分率）、残した網目の周期ベクトルの基底`network_period_vectors`、
 周期次元ごとの分子数`molecules_by_periodic_dimension`を記録します。
