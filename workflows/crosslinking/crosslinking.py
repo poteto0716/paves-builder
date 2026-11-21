@@ -4,6 +4,10 @@
 そのactivation.yamlのtarget_smartsに一致するYAMLを使う（例: oxetane/）。
 開始点0（--activation-count 0または--activation-fraction 0）なら反応cycleを省き、
 packと緩和だけの未反応モノマー構造を保存する。
+--start-structureで保存済みの構造（未反応モノマーの緩和構造など）を渡すと、packing・加圧・
+基準体積・初期NPT・反応前samplingを省き、その構造に開始点を作ってから
+opt → NVT（--nvt-timestep × --nvt-steps）→ NPT（--equilibration-timestep × --equilibration-steps）
+で緩和し、成長cycleへ進む。
 
 温度は既定で反応温度363.15 K（90 ℃、--temperature）に統一する。
 packing後の加圧NPT: 363.15 K、200 MPa、1 fs × 50,000 step = 50 ps（void除去）。
@@ -242,16 +246,16 @@ def activation_yaml_with_selection(text, *, count=None, fraction=None):
     return ''.join(lines[:first] + body + lines[end:])
 
 
-def gel_site_conversion(gel, origin, remaining_sites, sites_per_molecule):
+def gel_site_conversion(gel, origin, remaining_sites, sites_by_molecule):
     """Ring conversion of the kept gel, counted against its own original rings.
 
-    The gel's original rings are sites_per_molecule for every monomer
+    The gel's original rings are sites_by_molecule[i] for every monomer i
     (origin index) that ended up in it; a ring is unreacted when all atoms of
     a remaining site (stable_atom_id tuples from the reaction tracker) are in
     the gel. Rings opened by activation count as reacted.
     """
     kept = {a['stable_atom_id'] for g in gel.graphs for a in g['atoms']}
-    initial = sites_per_molecule * len({origin[sid] for sid in kept if sid in origin})
+    initial = sum(sites_by_molecule[i] for i in {origin[sid] for sid in kept if sid in origin})
     remaining = sum(1 for site in remaining_sites if kept.issuperset(site))
     return dict(gel_initial_epoxide_sites=initial, gel_unreacted_epoxide_sites=remaining,
                 gel_reacted_epoxide_sites=initial - remaining,
@@ -321,11 +325,11 @@ def sample_pre_reaction(runner, output, *, steps, frame_steps, timestep, tempera
     module = _sibling('pre_reaction')
     simulation = runner.simulation
     order = tuple(simulation._paves_stable_atom_ids)
-    groups = module.epoxide_groups(runner.engine.graph, remaining_conversion_sites(runner.engine.tracker), order)
+    groups = module.site_groups(runner.engine.graph, remaining_conversion_sites(runner.engine.tracker), order)
     if not groups:
         return None
     masses = [simulation.system.getParticleMass(i).value_in_unit(unit.dalton) for i in range(len(order))]
-    sampler = module.EpoxideSampler(groups, masses, cutoffs)
+    sampler = module.RingSampler(groups, masses, cutoffs)
 
     def frame():
         state = simulation.context.getState(getPositions=True)
@@ -343,6 +347,51 @@ def sample_pre_reaction(runner, output, *, steps, frame_steps, timestep, tempera
     frame()
     return sampler.summary(output, temperature_K=temperature, pressure_atm=pressure_atm,
                            sampling_ps=frames * frame_steps * timestep / 1000.)
+
+
+def load_start_structure(path):
+    """Saved structure JSON (graphs, positions, box_vectors in angstrom) as an unparameterized MolecularSystem.
+
+    Used to start crosslinking from a relaxed structure instead of packing:
+    the graphs keep their stable atom IDs; saved charges are not reused
+    (the reaction force field assigns its own). Returns the system and the
+    file's SHA-256.
+    """
+    import hashlib
+    import numpy as np
+    from polypaves.config import PavesConfig
+    from polypaves.molecular import MolecularSystem
+    path = Path(path).resolve()
+    raw = path.read_bytes()
+    data = json.loads(raw)
+    if not all(k in data for k in ('graphs', 'positions', 'box_vectors')):
+        raise ValueError(f'start structure needs graphs, positions and box_vectors: {path}')
+    if data.get('solvent_molecules'):
+        raise ValueError('start structure must not contain sorbed solvent')
+    graphs = copy.deepcopy(data['graphs'])
+    for graph in graphs:
+        for atom in graph['atoms']:
+            atom.pop('partial_charge', None)
+    xyz = np.asarray(data['positions'], dtype=float)
+    box = np.asarray(data['box_vectors'], dtype=float)
+    if box.shape == (3,):
+        box = np.diag(box)
+    if xyz.shape != (sum(len(g['atoms']) for g in graphs), 3) or not np.isfinite(xyz).all():
+        raise ValueError('start structure coordinates are missing or nonfinite')
+    if box.shape != (3, 3) or not np.allclose(box, np.diag(np.diag(box))) or np.linalg.det(box) <= 0:
+        raise ValueError('start structure needs a positive orthorhombic cell')
+    config = PavesConfig.from_structure(path, forcefield='sage', cell=np.diag(box))
+    spec = SimpleNamespace(name='monomer', terminator_head='', terminator_tail='')
+    structure = MolecularSystem(graphs, [0] * len(graphs), xyz, np.diag(box), config, component_specs=[spec])
+    structure._box_vectors = box.copy()
+    return structure, hashlib.sha256(raw).hexdigest()
+
+
+def target_sites(graph, target):
+    """Distinct atom sets of one plain graph matching the activation target (RDKit query)."""
+    from polypaves.molecular import _rdkit_molecule
+    return len({frozenset(m) for m in _rdkit_molecule(graph, perceive=False).GetSubstructMatches(
+        target, uniquify=True, maxMatches=100000)})
 
 
 def plan_size(total_atoms, atoms_per_molecule, sites_per_molecule, *, added_per_site,
@@ -403,7 +452,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         pack_relax=50, pack_postrelax=400,
         template_workers=4, reaction_assignment='local_templates', local_radius=5, local_context_radius=8,
         max_fragment_atoms=1200, template_cache=None, require_reaction_templates=False,
-        save_trajectory=False, remove_sol_fraction=False):
+        save_trajectory=False, remove_sol_fraction=False, start_structure=None):
     """packingから反応MD、最終構造の保存まで実行する。
 
     project: 保存先はカレントディレクトリ/results/<project>。
@@ -465,6 +514,11 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
       削除前はfinal_with_sol.*に残し、残すゲルと削除する分子を色分けしたOVITO用の
       final_with_sol_ovito.xyzも書く。抜けた体積はこのスクリプトでは緩和しない。
     最終構造と反応履歴は常に保存。集計JSONはcycleごとに更新する。
+    start_structure: 保存済み構造JSON（graphs・positions・box_vectors、Å）のパス。指定するとsmiles・
+      total_atoms・atom_count_mode・density・packing・加圧・基準体積・反応前samplingを使わず、
+      その構造の分子に開始点を作る。開始点の付加・opt後、NVT（nvt_timestep × nvt_steps）→
+      NPT（equilibration_timestep × equilibration_steps、1 atm）で緩和してから成長cycleへ進む。
+      開始点で足す原子の分だけ総原子数は増える。
     戻り値はReactiveMDResult。
     """
     if not isinstance(project, str) or not re.fullmatch(r'[\w][\w.-]*', project):
@@ -534,14 +588,23 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     _number(reference_temperature, 'reference_temperature')
     if 0 < pre_reaction_sampling_steps < 2 * pre_reaction_frame_steps:
         raise ValueError('pre_reaction_sampling_steps must be 0 or at least two frames (2 x pre_reaction_frame_steps)')
-    molecule = Chem.MolFromSmiles(smiles)
-    if molecule is None or len(Chem.GetMolFrags(molecule)) != 1:
-        raise ValueError('smiles must describe one connected molecule')
-    # Kekulé入力（C1=CC=CC=C1など）はそのまま単結合/二重結合のgraphになる。反応後の
-    # 再検証で原子だけが芳香族になり、局所フラグメントが環の単結合で切れて
-    # "non-ring atom N marked aromatic"で停止するため、芳香族表記の正規SMILESでpackする。
-    input_smiles, smiles = smiles, Chem.MolToSmiles(molecule)
-    atoms_per_molecule = Chem.AddHs(molecule).GetNumAtoms()
+    if start_structure is None:
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is None or len(Chem.GetMolFrags(molecule)) != 1:
+            raise ValueError('smiles must describe one connected molecule')
+        # Kekulé入力（C1=CC=CC=C1など）はそのまま単結合/二重結合のgraphになる。反応後の
+        # 再検証で原子だけが芳香族になり、局所フラグメントが環の単結合で切れて
+        # "non-ring atom N marked aromatic"で停止するため、芳香族表記の正規SMILESでpackする。
+        input_smiles, smiles = smiles, Chem.MolToSmiles(molecule)
+        atoms_per_molecule = Chem.AddHs(molecule).GetNumAtoms()
+    else:
+        structure, start_sha256 = load_start_structure(start_structure)
+        from polypaves.molecular import _rdkit_molecule
+        # 構造に含まれる分子種（通常はモノマー1種）を記録する。smilesは使わない。
+        smiles = '.'.join(sorted({Chem.MolToSmiles(Chem.RemoveHs(_rdkit_molecule(g))) for g in structure.graphs}))
+        input_smiles = None
+        sizes = {len(g['atoms']) for g in structure.graphs}
+        atoms_per_molecule = sizes.pop() if len(sizes) == 1 else None
     activation_rule = load_activation_definitions(definitions / 'activation.yaml')[0]
     rules = load_reaction_definitions(definitions / 'reactions.yaml')
     selector = rules.selection
@@ -557,15 +620,34 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
     target = Chem.MolFromSmarts(activation_rule.target_smarts)
     if target is None:
         raise ValueError(f'activation.yaml target_smarts is invalid: {activation_rule.target_smarts}')
-    sites_per_molecule = len(Chem.AddHs(molecule).GetSubstructMatches(target))
     starts_requested = activation_count if activation_count is not None else activation_fraction
-    if not sites_per_molecule and starts_requested:
-        raise ValueError(f'smiles has no site matching activation.yaml target_smarts '
-                         f'{activation_rule.target_smarts}; use YAMLs for this ring (e.g. oxetane/) '
-                         'or 0 starts for an unreacted monomer')
-    plan = plan_size(total_atoms, atoms_per_molecule, sites_per_molecule,
-                     added_per_site=len(activation_rule.atoms_to_add), count=activation_count,
-                     fraction=activation_fraction, mode=atom_count_mode)
+    if start_structure is None:
+        sites_per_molecule = len(Chem.AddHs(molecule).GetSubstructMatches(target))
+        if not sites_per_molecule and starts_requested:
+            raise ValueError(f'smiles has no site matching activation.yaml target_smarts '
+                             f'{activation_rule.target_smarts}; use YAMLs for this ring (e.g. oxetane/) '
+                             'or 0 starts for an unreacted monomer')
+        plan = plan_size(total_atoms, atoms_per_molecule, sites_per_molecule,
+                         added_per_site=len(activation_rule.atoms_to_add), count=activation_count,
+                         fraction=activation_fraction, mode=atom_count_mode)
+        sites_by_molecule = [sites_per_molecule] * plan['monomers']
+    else:
+        sites_by_molecule = [target_sites(g, target) for g in structure.graphs]
+        sites = sum(sites_by_molecule)
+        if not sites and starts_requested:
+            raise ValueError(f'the start structure has no site matching activation.yaml target_smarts '
+                             f'{activation_rule.target_smarts}')
+        if activation_fraction is not None and not 0 <= activation_fraction < 1:
+            raise ValueError('activation_fraction must satisfy 0 <= fraction < 1')
+        if activation_count is not None and (type(activation_count) is not int or activation_count < 0):
+            raise ValueError('activation_count must be an integer >= 0')
+        starts = activation_count if activation_count is not None else math.floor(activation_fraction * sites)
+        if sites and starts >= sites:
+            raise ValueError('Requested starts consume every reactive site')
+        added = len(activation_rule.atoms_to_add)
+        plan = dict(monomers=len(structure.graphs), activation_count=starts,
+                    actual_total_atoms=structure.n_atoms + added * starts, packed_atoms=structure.n_atoms,
+                    initial_epoxide_sites=sites)
     if max_reactions_per_cycle is not None:
         rules = [replace(rule, max_reactions_per_cycle=max_reactions_per_cycle) for rule in rules]
     rules = [replace(rule, distance_cutoff=reaction_cutoff) for rule in rules]
@@ -576,6 +658,9 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         stages = (MDStage('NVT', steps=nvt_steps, timestep=nvt_timestep, temperature=temperature),
                   MDStage('NPT', steps=npt_steps, timestep=npt_timestep, temperature=temperature,
                           pressure=pressure_bar))
+    if start_structure is not None:
+        # 保存済みの緩和構造から始める。packing直後のvoid除去・基準体積・反応前samplingは行わない。
+        compression_steps = reference_npt_steps = pre_reaction_sampling_steps = 0
     if compression_steps:
         _number(compression_pressure_mpa, 'compression_pressure_mpa')
         if compression_pressure_mpa <= 0:
@@ -586,6 +671,8 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                    if compression_steps else None)
     equilibration = MDStage('NPT', steps=equilibration_steps, timestep=equilibration_timestep,
                             temperature=temperature, pressure=pressure_bar)
+    # 開始点の付加で伸びた結合を0.1 fsでならしてから1 atmへ。
+    activation_relaxation = MDStage('NVT', steps=nvt_steps, timestep=nvt_timestep, temperature=temperature)
 
     # 入力と両YAMLを検証してから、指定されたprojectだけを作り直す。
     if results_directory.is_symlink() or output.is_symlink():
@@ -603,23 +690,27 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
         (definitions / 'activation.yaml').read_text(), **cli_selection))
     precision = 'mixed' if platform == 'CUDA' else None
 
-    # p.Solventはpackへの分子指定。開始点で追加するHを原子予算から引く。
     print(f"Project {project}: {plan['monomers']} molecules, {plan['actual_total_atoms']} atoms, "
           f"{plan['activation_count']}/{plan['initial_epoxide_sites']} reactive-site starts", flush=True)
-    structure = p.pack(
-        [p.Solvent(smiles, name='epoxy')], counts=[plan['monomers']],
-        density=density, temperature=temperature,
-        forcefield='sage', forcefield_version='2.3.0',
-        platform=platform, precision=precision, seed=seed,
-        trials=20, relax=pack_relax, postrelax=pack_postrelax,
-    )
+    if start_structure is None:
+        # p.Solventはpackへの分子指定。開始点で追加するHを原子予算から引く。
+        structure = p.pack(
+            [p.Solvent(smiles, name='epoxy')], counts=[plan['monomers']],
+            density=density, temperature=temperature,
+            forcefield='sage', forcefield_version='2.3.0',
+            platform=platform, precision=precision, seed=seed,
+            trials=20, relax=pack_relax, postrelax=pack_postrelax,
+        )
+        piercing = structure.report.get('ring_piercing_bonds')
+        if piercing is None:
+            raise RuntimeError('This polypaves does not report ring piercing after packing')
+    else:
+        from polypaves.ring_piercing import ring_piercing_bonds
+        piercing = len(ring_piercing_bonds(structure.graphs, structure._positions, structure.box_vectors))
     packed_atoms = structure.n_atoms
     structure.write_json(output / 'before_activation.structure.json')
-    piercing = structure.report.get('ring_piercing_bonds')
-    if piercing is None:
-        raise RuntimeError('This polypaves does not report ring piercing after packing')
     if piercing:
-        raise RuntimeError(f'{piercing} bonds pierce rings after packing; increase --pack-postrelax/--pack-relax '
+        raise RuntimeError(f'{piercing} bonds pierce rings before activation; increase --pack-postrelax/--pack-relax '
                            'or lower --density (see before_activation.structure.json)')
     if packed_atoms != plan['packed_atoms']:
         raise RuntimeError('Packed atom count differs from the size plan')
@@ -667,7 +758,11 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                                                 if plan['initial_epoxide_sites'] else 0.),
                     initial_reactive_sites=plan['initial_epoxide_sites'],
                     activation_target_smarts=activation_rule.target_smarts,
-                    density_g_cm3=density, temperature_K=temperature, pressure_atm=pressure_atm,
+                    start_structure=str(Path(start_structure).resolve()) if start_structure else None,
+                    start_structure_sha256=start_sha256 if start_structure else None,
+                    activation_relaxation=asdict(activation_relaxation) if start_structure else None,
+                    density_g_cm3=None if start_structure else density,
+                    temperature_K=temperature, pressure_atm=pressure_atm,
                     compression=asdict(compression) if compression else None,
                     compression_pressure_MPa=compression_pressure_mpa if compression else None,
                     equilibration=asdict(equilibration),
@@ -743,7 +838,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             print(f"Reference volume before crosslinking at {reference_temperature:g} K: "
                   f"{reference['volume_nm3']:.3f} nm^3 (mean of the last {reference['frames_averaged']} frames)",
                   flush=True)
-        runner.equilibrate([equilibration])
+        runner.equilibrate([activation_relaxation, equilibration] if start_structure else [equilibration])
         if pre_reaction_sampling_steps >= 2 * pre_reaction_frame_steps:
             # 反応前の平衡状態（反応温度・1 atm）での未反応環の統計。反応はまだ起こさない。
             equilibrium = sample_pre_reaction(runner, output / 'pre_reaction', steps=pre_reaction_sampling_steps,
@@ -751,10 +846,10 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
                 pressure_atm=pressure_atm,
                 cutoffs=[reaction_cutoff] if fixed_reaction_cutoff else [reaction_cutoff, max_reaction_cutoff])
             if equilibrium is not None:
-                start['pre_reaction_epoxides'] = {k: v for k, v in equilibrium.items() if k != 'definitions'}
+                start['pre_reaction_rings'] = {k: v for k, v in equilibrium.items() if k != 'definitions'}
                 cut = f'{reaction_cutoff:g}'
-                print(f"Pre-reaction equilibrium at {temperature:g} K: {equilibrium['epoxides']} rings, "
-                      f"{equilibrium['epoxide_number_density_nm3']['mean']:.3f} nm^-3, coordination "
+                print(f"Pre-reaction equilibrium at {temperature:g} K: {equilibrium['rings']} {equilibrium['ring']} rings, "
+                      f"{equilibrium['ring_number_density_nm3']['mean']:.3f} nm^-3, coordination "
                       f"{equilibrium['by_cutoff_A'][cut]['coordination_number']['mean']:.2f} and largest cluster "
                       f"{equilibrium['by_cutoff_A'][cut]['largest_cluster_fraction']['mean']:.3f} within {cut} A, "
                       f"MSD {equilibrium['msd_final_A2']:.2f} A^2 over {equilibrium['msd_final_lag_ps']:g} ps", flush=True)
@@ -822,7 +917,7 @@ def run(project, *, force=False, compression_steps=50_000, compression_pressure_
             if final is not None:
                 # 残したゲルだけで数えた反応率（開始点で開いた環も反応済に含む）。
                 metrics.update(gel_site_conversion(final, origin, remaining_conversion_sites(runner.engine.tracker),
-                                                   sites_per_molecule))
+                                                   sites_by_molecule))
             (output / 'metrics.json').write_text(json.dumps(metrics, indent=2) + '\n')
             if final is None:
                 raise RuntimeError('No molecule percolates in three dimensions (below the gel point): '
@@ -864,6 +959,8 @@ def main():
     starts.add_argument('--activation-fraction', type=float,
                         help='開始点の割合（0以上1未満）。0なら反応させない。省略時はactivation.yamlを使用')
     parser.add_argument('--project', required=True, help='保存先: カレントのresults/<project>')
+    parser.add_argument('--start-structure', type=Path,
+                        help='packingせず、この保存済み構造JSON（未反応モノマーの緩和構造など）に開始点を作って始める')
     parser.add_argument('--force', action='store_true', help='既存projectの内容を削除して再実行する')
     parser.add_argument('--save-trajectory', action='store_true',
                         help='OVITO軌跡とcycle別構造を保存する（既定OFF）')

@@ -1,4 +1,12 @@
-"""Per-replica network construction (epoxy, oxetane, ...) -> thermal history -> dry and solvent properties."""
+"""Monomer -> crosslinked network property workflow (epoxy, oxetane, ...).
+
+monomer   pack and relax the monomer at T, thermal history (Tg), 300 K properties,
+          then T properties and the relaxed T structure.
+crosslink one project per start-site density under <monomer>/crosslinks/; replica N
+          crosslinks at T from monomer replica N, then thermal history (Tg) and 300 K.
+network   a saved dry network evaluated like a crosslink project.
+mechanical  optional elastic constants of a finished crosslink/network replica.
+"""
 from __future__ import annotations
 
 import argparse
@@ -34,7 +42,7 @@ DEFAULTS = dict(replicates=4, seed=31415, platform='CUDA', timestep_fs=1.,
     solvent_production_ps=10000., diffusion_min_duration_ps=1000.,
     alchemical_windows=22, alchemical_equilibration_ps=100.,
     alchemical_sampling_ps=500., standard_density_nm3=.602214076,
-    mechanical=True, nvt_production_ps=10000.,
+    nvt_production_ps=10000.,
     elastic_strain=.01, elastic_equilibration_ps=200., elastic_production_ps=1000.,
     cte_offset_K=50., smoke=False)
 # Version of the cooling fit stored in dry_result.json; report/collect refit older ones from cooling.csv.
@@ -68,11 +76,31 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+MODES = ('monomer', 'crosslink', 'saved_network')
+
+
+def mode(cfg):
+    return cfg.get('input_mode', 'saved_network')
+
+
 def input_digest(project, cfg):
-    if cfg.get('input_mode') == 'epoxy':
-        from workflows.network_properties.epoxy_pipeline import definition_digest
+    if mode(cfg) in ('monomer', 'crosslink'):
+        from workflows.network_properties.construction import definition_digest
         return definition_digest(project)
     return digest(Path(project) / cfg['network'])
+
+
+def children(project):
+    """Crosslink projects of a monomer project, sorted by name."""
+    return sorted(path.parent for path in (Path(project) / 'crosslinks').glob('*/project.json'))
+
+
+def collection_root(project, cfg):
+    """Directory whose project comparison includes this project: the parent of the monomer project."""
+    if mode(cfg) == 'crosslink':
+        from workflows.network_properties.construction import parent_project
+        return parent_project(project, cfg).parent
+    return Path(project).resolve().parent
 
 
 def validate(cfg):
@@ -93,6 +121,8 @@ def validate(cfg):
             raise ValueError(f'{key} must be finite and positive')
     if not cfg['low_K'] < 300 < cfg['high_K']:
         raise ValueError('temperature range must bracket 300 K')
+    if mode(cfg) not in MODES:
+        raise ValueError(f'input_mode must be one of {MODES}')
     # Projects created before cte_offset_K existed use the default.
     offset = cfg.get('cte_offset_K', DEFAULTS['cte_offset_K'])
     if isinstance(offset, bool) or not isinstance(offset, (int, float)) or not math.isfinite(offset) or offset <= 0:
@@ -113,9 +143,31 @@ def validate(cfg):
         if not smiles:
             raise ValueError('empty solvent SMILES')
         names.add(name)
-    if cfg.get('input_mode') == 'epoxy':
-        from workflows.network_properties.epoxy_pipeline import validate as validate_epoxy
-        validate_epoxy(cfg)
+    if mode(cfg) in ('monomer', 'crosslink'):
+        from workflows.network_properties.construction import CHEMISTRIES
+        if cfg.get('chemistry') not in CHEMISTRIES:
+            raise ValueError(f'chemistry must be one of {sorted(CHEMISTRIES)}')
+        temperature = cfg.get('temperature_K')
+        if isinstance(temperature, bool) or not isinstance(temperature, (int, float)) or not temperature > 0:
+            raise ValueError('temperature_K must be positive')
+    if mode(cfg) == 'monomer':
+        from workflows.network_properties.construction import validate_monomer
+        if cfg['solvents']:
+            raise ValueError('solvents belong to the crosslink projects, not the monomer project')
+        if not cfg['low_K'] < cfg['temperature_K'] < cfg['high_K']:
+            raise ValueError('the thermal history range must bracket temperature_K')
+        for key in ('t_equilibration_ps', 't_production_ps', 't_nvt_production_ps'):
+            if isinstance(cfg[key], bool) or not math.isfinite(cfg[key]) or cfg[key] <= 0:
+                raise ValueError(f'{key} must be finite and positive')
+        if cfg['t_production_ps'] / cfg['sample_interval_ps'] < 20:
+            raise ValueError('the T production must have at least 20 samples')
+        cutoffs = cfg['ring_contact_cutoffs_A']
+        if not cutoffs or not all(isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0 for c in cutoffs):
+            raise ValueError('ring_contact_cutoffs_A must be a list of positive distances')
+        validate_monomer(cfg)
+    elif mode(cfg) == 'crosslink':
+        from workflows.network_properties.construction import validate_crosslink
+        validate_crosslink(cfg)
 
 
 def relaxation_stages_argument(value):
@@ -124,22 +176,19 @@ def relaxation_stages_argument(value):
     return load_relaxation_stages(value)
 
 
-def new(args):
-    if args.project.exists():
-        raise FileExistsError(f'Project exists: {args.project}')
+def base_config(args, smoke):
     cfg = json.loads(json.dumps(DEFAULTS))
-    cfg.update(platform=args.platform,
-               replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']),
-               seed=args.seed,
-               solvent_molecules=args.solvent_molecules, mechanical=not args.skip_mechanical)
-    if args.high_temperature is not None:
+    cfg.update(platform=args.platform, seed=args.seed)
+    if getattr(args, 'high_temperature', None) is not None:
         cfg['high_K'] = args.high_temperature
-    for entry in args.solvent:
+    for entry in getattr(args, 'solvent', None) or []:
         name, sep, smiles = entry.partition('=')
         if not sep:
             raise ValueError('--solvent expects NAME=SMILES')
         cfg['solvents'].append(dict(name=name, smiles=smiles))
-    if args.smoke:
+    if getattr(args, 'solvent_molecules', None) is not None:
+        cfg['solvent_molecules'] = args.solvent_molecules
+    if smoke:
         cfg.update(smoke=True, timestep_fs=.25,
             heat_step_ps=.002, high_equilibration_ps=.002,
             cooling_rate_K_ns=10_000_000., reheat_step_ps=.002,
@@ -148,45 +197,115 @@ def new(args):
             solvent_nvt_ps=.002, solvent_equilibration_ps=.002, solvent_production_ps=.02,
             alchemical_windows=4, alchemical_equilibration_ps=.001, alchemical_sampling_ps=.004,
             nvt_production_ps=.02)
-    definitions = None
-    if args.network is not None:
-        construction_flags = ('chemistry', 'total_atoms', 'atom_count_mode', 'cycles', 'target_conversion',
-                              'activation_count', 'activation_fraction', 'max_reactions_per_cycle',
-                              'activation_yaml', 'reactions_yaml', 'compression_pressure_mpa',
-                              'compression_steps', 'reaction_cutoff', 'max_reaction_cutoff',
-                              'reaction_minimization_iterations', 'post_reaction_md_steps',
-                              'relaxation_stages', 'stop_after_idle_cycles', 'template_workers',
-                              'reaction_minimization_radius', 'packing_density',
-                              'final_relaxation_steps', 'final_md_steps')
-        if (any(getattr(args, name, None) is not None for name in construction_flags)
-                or args.save_trajectory or args.fixed_reaction_cutoff or args.remove_sol_fraction):
-            raise ValueError('--network cannot be combined with network construction options')
-        source = args.network.resolve()
-        data = json.loads(source.read_text())
-        if not all(k in data for k in ('graphs', 'positions', 'box_vectors')):
-            raise ValueError('network must be a PAVES saved-charge structure JSON')
-        if data.get('solvent_molecules', 0):
-            raise ValueError('input must be a dry network')
-        if not all('partial_charge' in a for g in data['graphs'] for a in g['atoms']):
-            raise ValueError('all network atoms must have saved partial charges')
-        cfg.update(network='input.structure.json', source=str(source), input_sha256=digest(source),
-                   input_mode='saved_network', schema_version=1)
-    else:
-        from workflows.network_properties.epoxy_pipeline import configure
-        construction, definitions = configure(args)
-        cfg.update(construction)
+    return cfg
+
+
+def _create(project, cfg, definitions=None, network=None):
     validate(cfg)
-    args.project.mkdir(parents=True)
-    if definitions is None:
-        (args.project / cfg['network']).write_bytes(source.read_bytes())
-    else:
-        (args.project / 'crosslinking').mkdir()
-        for name, content in definitions.items():
-            (args.project / 'crosslinking' / name).write_bytes(content)
-    write_json(args.project / 'project.json', cfg)
+    project.mkdir(parents=True)
+    if definitions is not None:
+        from workflows.network_properties.construction import write_definitions
+        write_definitions(project, definitions)
+    if network is not None:
+        (project / cfg['network']).write_bytes(network.read_bytes())
+    write_json(project / 'project.json', cfg)
+    print(f'Created {project / "project.json"}', flush=True)
+
+
+def new_monomer(args):
+    """Monomer project: build at T, thermal history, 300 K and T properties."""
+    from workflows.network_properties import monomer
+    from workflows.network_properties.construction import (definitions_for, definition_digest, monomer_options,
+                                                           reactive_sites)
+    project = args.project
+    if project.exists():
+        raise FileExistsError(f'Project exists: {project}')
+    cfg = base_config(args, args.smoke)
+    cfg.update(replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']))
+    chemistry = args.chemistry or 'epoxy'
+    cfg.update(input_mode='monomer', schema_version=3, chemistry=chemistry, **json.loads(json.dumps(monomer.DEFAULTS)))
+    cfg['temperature_K'] = float(args.temperature)
+    if args.smoke:
+        cfg.update(monomer.SMOKE)
+    cfg['build'] = monomer_options(args, cfg['temperature_K'])
+    definitions = definitions_for(chemistry, args.activation_yaml, args.reactions_yaml)
+    cfg['reactive_sites_per_molecule'] = reactive_sites(cfg['build']['smiles'], definitions['activation.yaml'])
+    _create(project, cfg, definitions)
+    cfg['input_sha256'] = definition_digest(project)
+    write_json(project / 'project.json', cfg)
     from workflows.network_properties.directory_summary import enable_collection
-    enable_collection(args.project.parent)
-    print(f'Created {args.project / "project.json"}; edit durations there before run.', flush=True)
+    enable_collection(project.resolve().parent)
+    print(f'Next: run {project} (or submit), then crosslink {project} --activation-fraction ...', flush=True)
+
+
+def crosslink_name(count=None, fraction=None):
+    return f'n{count}' if count is not None else f'af{fraction:g}'
+
+
+def new_crosslink(args):
+    """One crosslink project per start-site density under <monomer>/crosslinks/."""
+    from workflows.network_properties.construction import (crosslink_options, definition_digest, with_selection,
+                                                           DEFINITIONS)
+    from workflows.network_properties.execution import configuration_fingerprint
+    parent = args.monomer.resolve()
+    parent_cfg = json.loads((parent / 'project.json').read_text())
+    if mode(parent_cfg) != 'monomer':
+        raise ValueError(f'{parent} is not a monomer project')
+    validate(parent_cfg)
+    values = ([dict(count=v) for v in args.activation_count] if args.activation_count is not None
+              else [dict(fraction=v) for v in args.activation_fraction])
+    if args.name and len(values) != 1:
+        raise ValueError('--name names one density; omit it for several')
+    if not parent_cfg['reactive_sites_per_molecule'] and any(v.get('count', v.get('fraction')) for v in values):
+        raise ValueError(f"the monomer has no site matching the activation target_smarts; only 0 starts are possible")
+    replicates = args.replicates if args.replicates is not None else parent_cfg['replicates']
+    if not 1 <= replicates <= parent_cfg['replicates']:
+        raise ValueError(f'replicates must lie between 1 and the monomer replicates ({parent_cfg["replicates"]}): '
+                         'crosslink replica N starts from monomer replica N')
+    plans = []
+    for value in values:
+        project = parent / 'crosslinks' / (args.name or crosslink_name(**value))
+        if project.exists():
+            raise FileExistsError(f'Project exists: {project}')
+        cfg = base_config(args, parent_cfg['smoke'])
+        cfg.update(platform=args.platform or parent_cfg['platform'],
+                   seed=args.seed if args.seed is not None else parent_cfg['seed'], replicates=replicates)
+        cfg.update(input_mode='crosslink', schema_version=3, chemistry=parent_cfg['chemistry'],
+                   temperature_K=parent_cfg['temperature_K'], parent='../..',
+                   parent_configuration_sha256=configuration_fingerprint(parent_cfg))
+        cfg['crosslinking'] = crosslink_options(args, temperature=parent_cfg['temperature_K'],
+                                                smoke=parent_cfg['smoke'], **value)
+        definitions = with_selection({name: (parent / 'definitions' / name).read_bytes() for name in DEFINITIONS},
+                                     **value)
+        validate(cfg)
+        plans.append((project, cfg, definitions))
+    for project, cfg, definitions in plans:
+        _create(project, cfg, definitions)
+        cfg['input_sha256'] = definition_digest(project)
+        write_json(project / 'project.json', cfg)
+    print(f'Next: run or submit {parent} --all (or each crosslink directory)', flush=True)
+
+
+def new_network(args):
+    """A saved dry network: thermal history (Tg), 300 K properties and solvents."""
+    project = args.project
+    if project.exists():
+        raise FileExistsError(f'Project exists: {project}')
+    cfg = base_config(args, args.smoke)
+    cfg.update(replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']))
+    source = args.network.resolve()
+    data = json.loads(source.read_text())
+    if not all(k in data for k in ('graphs', 'positions', 'box_vectors')):
+        raise ValueError('network must be a PAVES saved-charge structure JSON')
+    if data.get('solvent_molecules', 0):
+        raise ValueError('input must be a dry network')
+    if not all('partial_charge' in a for g in data['graphs'] for a in g['atoms']):
+        raise ValueError('all network atoms must have saved partial charges')
+    cfg.update(network='input.structure.json', source=str(source), input_sha256=digest(source),
+               input_mode='saved_network', schema_version=3)
+    _create(project, cfg, network=source)
+    from workflows.network_properties.directory_summary import enable_collection
+    enable_collection(project.resolve().parent)
 
 
 def steps(ps, cfg):
@@ -199,8 +318,13 @@ def set_temperature(runner, temperature):
     runner.integrator.setTemperature(temperature * unit.kelvin)
 
 
-def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, minimize=False):
-    """Completed phases resume from portable state; interrupted phases rerun."""
+def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, minimize=False, base=None, observe=None):
+    """Completed phases resume from portable state; interrupted phases rerun.
+
+    base: replica directory for progress records (default: the phase's parent).
+    observe: with sample, an object whose add(runner) sees every sample and
+    finish(directory, duration_ps) runs before the phase is marked done.
+    """
     import openmm as mm
     from openmm import unit
     directory.mkdir(parents=True, exist_ok=True)
@@ -210,7 +334,9 @@ def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, min
         runner.context.setState(mm.XmlSerializer.deserialize((directory / 'state.xml').read_text()))
         return json.loads((directory / 'samples.json').read_text())
     print(f'{directory.name}: {temperature:g} K, {duration_ps:g} ps', flush=True)
-    set_stage(directory.parent, f'thermal history: {directory.name}',
+    stage_base = base or directory.parent
+    where = '' if stage_base == directory.parent else f'{directory.parent.name}/'
+    set_stage(stage_base, f'thermal history: {where}{directory.name}',
               temperature_K=float(temperature), duration_ps=float(duration_ps))
     if minimize:
         runner.minimize(cfg['minimization_iterations'])
@@ -232,6 +358,10 @@ def phase(runner, directory, cfg, temperature, duration_ps, *, sample=False, min
                 density_g_cm3=float(mass * DA / (volume * 1e-27) / 1000),
                 potential_kJ_mol=state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole),
                 kinetic_kJ_mol=state.getKineticEnergy().value_in_unit(unit.kilojoule_per_mole)))
+            if observe is not None:
+                observe.add(runner)
+    if observe is not None:
+        observe.finish(directory, elapsed * cfg['timestep_fs'] / 1000)
     state = runner.context.getState(getPositions=True, getVelocities=True)
     volume = state.getPeriodicBoxVolume().value_in_unit(unit.nanometer**3)
     (directory / 'state.xml').write_text(mm.XmlSerializer.serialize(state))
@@ -274,15 +404,18 @@ def history_densities(directory):
                 possible_vaporization=bool(ratio is not None and ratio < .7))
 
 
-def nvt_properties(runner, directory, cfg, mass_Da):
+def nvt_properties(runner, directory, cfg, mass_Da, *, temperature=300., equilibration_ps=None,
+                   production_ps=None, base=None):
     from openmm import unit
     directory.mkdir(exist_ok=True)
     if (directory / 'result.json').exists():
         return json.loads((directory / 'result.json').read_text())
-    print('300 K NVT: direct Cv and dielectric response', flush=True)
-    set_stage(directory.parent, '300 K NVT: direct Cv and dielectric response')
+    print(f'{temperature:g} K NVT: direct Cv and dielectric response', flush=True)
+    set_stage(base or directory.parent, f'{temperature:g} K NVT: direct Cv and dielectric response')
+    set_temperature(runner, temperature)
     # Restart this branch from the completed NPT phase after an interruption.
-    runner.md(steps(cfg['equilibration_300_ps'], cfg), ensemble='NVT')
+    runner.md(steps(cfg['equilibration_300_ps'] if equilibration_ps is None else equilibration_ps, cfg),
+              ensemble='NVT')
     charges = np.array([a['partial_charge'] for g in runner.host.graphs for a in g['atoms']])
     if abs(charges.sum()) > 1e-4:
         raise ValueError('dielectric estimator requires a neutral network')
@@ -290,7 +423,8 @@ def nvt_properties(runner, directory, cfg, mass_Da):
     previous, box = initial['positions'], initial['box']
     inverse = np.linalg.inv(box)
     moment, rows = np.zeros(3), []
-    total, elapsed = steps(cfg.get('nvt_production_ps', cfg['production_ps']), cfg), 0
+    total = steps(cfg.get('nvt_production_ps', cfg['production_ps']) if production_ps is None else production_ps, cfg)
+    elapsed = 0
     while elapsed < total:
         chunk = min(steps(cfg['sample_interval_ps'], cfg), total-elapsed)
         runner.md(chunk, ensemble='NVT')
@@ -304,7 +438,8 @@ def nvt_properties(runner, directory, cfg, mass_Da):
             volume_nm3=float(np.linalg.det(box)), potential_kJ_mol=state['energy'],
             kinetic_kJ_mol=state['kinetic_energy'],
             **{f'dipole_{axis}_e_nm':float(value) for axis,value in zip('xyz',moment)}))
-    result = analyze_nvt(rows, mass_Da, min_effective_samples=cfg['min_effective_samples'])
+    result = analyze_nvt(rows, mass_Da, temperature_K=temperature, min_effective_samples=cfg['min_effective_samples'])
+    result['temperature_K'] = float(temperature)
     write_json(directory / 'samples.json', rows)
     write_csv(directory / 'samples.csv', rows)
     write_json(directory / 'result.json', result)
@@ -394,7 +529,7 @@ def dry_properties(project, cfg, replica):
     directory.mkdir(exist_ok=True)
     if (directory / 'dry_result.json').exists():
         return json.loads((directory / 'dry_result.json').read_text())
-    from workflows.network_properties.epoxy_pipeline import network_path
+    from workflows.network_properties.construction import network_path
     host = load_network(network_path(project, cfg, replica))
     # Count zero means no solvent is appended; reusing host avoids typing a dummy solvent.
     runner = FixedLoadingSimulation(host, host, host.positions_nm, 0, box_nm=host.box_nm,
@@ -524,48 +659,73 @@ def solvent_properties(project, cfg, replica, specification):
 
 
 def report(project):
-    project = Path(project)
+    project = Path(project).resolve()
     if not (project / 'project.json').is_file():
         raise FileNotFoundError(project / 'project.json')
     with file_lock(project / '.report.lock'):
         result = _report(project)
+    cfg = json.loads((project / 'project.json').read_text())
+    if mode(cfg) == 'crosslink':
+        # The monomer report holds the crosslink series of all densities.
+        from workflows.network_properties.construction import parent_project
+        parent = parent_project(project, cfg)
+        with file_lock(parent / '.report.lock'):
+            _report(parent)
     from workflows.network_properties.directory_summary import MARKER, collect_projects
-    if (project.parent / MARKER).is_file():
-        collect_projects(project.parent)
+    root = collection_root(project, cfg)
+    if (root / MARKER).is_file():
+        collect_projects(root)
     return result
+
+
+NOTES = dict(
+    monomer='Each replica packs and relaxes its own monomer liquid at T with an independent seed; '
+            'crosslink replica N of every density starts from monomer replica N.',
+    crosslink='Each replica creates its start sites in the relaxed T structure of the same-numbered monomer '
+              'replica and crosslinks with its own seed.',
+    saved_network='Replicas share the supplied topology; only thermal trajectories/seeds differ.')
 
 
 def _report(project):
     from workflows.network_properties.replica_summary import collect, write_tables, markdown
+    from workflows.network_properties.analysis import aggregate as aggregate_values
     cfg = json.loads((project / 'project.json').read_text())
     check_run_signature(project, cfg)
     refresh_cooling_fits(project, cfg)
     replica_ids, properties = collect(project, cfg)
     write_tables(project, replica_ids, properties)
     dry = [json.loads(path.read_text()) for path in sorted(project.glob('replica_*/dry_result.json'))]
-    result = dict(smoke=cfg['smoke'], completed_replicas=len(dry), requested_replicas=cfg['replicates'],
-        replica_statistics=aggregate([dict(npt=r['npt']['estimates'], nvt=r.get('nvt', {}), cooling={k:v for k,v in r['cooling'].items()
-            if k != 'bins'}) for r in dry]),
+    kind = mode(cfg)
+    result = dict(smoke=cfg['smoke'], input_mode=kind, completed_replicas=len(dry), requested_replicas=cfg['replicates'],
+        replica_statistics=aggregate_values([dict(npt=r['npt']['estimates'], nvt=r.get('nvt', {}),
+            cooling={k:v for k,v in r['cooling'].items() if k != 'bins'}) for r in dry]),
         dry_sampling_checks_passed=bool(len(dry) == cfg['replicates'] and not cfg['smoke']
             and all(r['npt']['sampling_checks_passed'] for r in dry)),
         tg_fit_checks_passed=bool(len(dry) == cfg['replicates'] and not cfg['smoke']
             and all(r['cooling']['fit_checks_passed'] for r in dry)),
-        independent_network_topologies=cfg.get('input_mode') == 'epoxy',
-        note=('Each replica packs and crosslinks its own network using an independent seed.'
-              if cfg.get('input_mode') == 'epoxy' else
-              'Replicas share the supplied topology; only thermal trajectories/seeds differ.'),
+        note=NOTES[kind],
         scope=dict(thermodynamics='Density, Cp/Cv, CTE, compressibility, Kt/Ks, bulk sound speed.',
             structure='Geometric diagnostics from the existing wheel.',
             optical='Refractive index/Abbe number require electronic polarizabilities; not inferred from fixed charges.',
             dielectric='Fixed-charge NVT dielectric tensor from continuous atomic charge displacements; no electronic polarization.',
-            cohesive_energy='A percolating network has no unique isolated-molecule reference; not reported.'))
-    result['scope']['mechanical'] = 'Requested; see replica outputs.' if cfg['mechanical'] else 'Disabled in project.json.'
+            cohesive_energy='A percolating network has no unique isolated-molecule reference; not reported.',
+            mechanical='Optional: network_properties.py mechanical <project> after the 300 K properties.'))
+    if kind == 'monomer':
+        from workflows.network_properties import monomer
+        values = [json.loads(p.read_text()) for p in sorted(project.glob(f'replica_*/{monomer.label(cfg)}/result.json'))]
+        result['at_temperature'] = dict(temperature_K=cfg['temperature_K'], completed_replicas=len(values),
+            replica_statistics=aggregate_values([dict(npt=v['npt']['estimates'], nvt=v['nvt'],
+                reactive_ring_density=v['reactive_ring_density'],
+                reactive_rings={k: x for k, x in (v['reactive_rings'] or {}).items() if k != 'definitions'})
+                for v in values]),
+            sampling_checks_passed=bool(len(values) == cfg['replicates'] and not cfg['smoke']
+                and all(v['npt']['sampling_checks_passed'] for v in values)))
     from workflows.network_properties.mechanical import result_current
     paths = [p for p in sorted(project.glob('replica_*/mechanical/result.json')) if result_current(p.parent.parent)]
     if paths:
         values = [json.loads(p.read_text()) for p in paths]
         result['mechanical'] = dict(completed_replicas=len(values),
-            replica_statistics=aggregate([v.get('isotropic', {}) for v in values]),
+            replica_statistics=aggregate_values([v.get('isotropic', {}) for v in values]),
             sampling_checks_passed=bool(len(values) == cfg['replicates'] and not cfg['smoke']
                 and all(v.get('sampling_checks_passed', False) for v in values)))
     result['solvents'] = {}
@@ -574,7 +734,7 @@ def _report(project):
         values = [json.loads(p.read_text()) for p in paths]
         result['solvents'][spec['name']] = dict(completed_replicas=len(paths),
             results=[str(p.relative_to(project)) for p in paths],
-            replica_statistics=aggregate([dict(
+            replica_statistics=aggregate_values([dict(
                 coupling_free_energy_kJ_mol=v['infinite_dilution_free_energy']['coupling_free_energy_kJ_mol'],
                 chemical_potential_relative_kJ_mol=v['infinite_dilution_free_energy']['chemical_potential_relative_kJ_mol'],
                 diffusion_coefficient_m2_s=v['fixed_loading']['diffusion']['diffusion_coefficient_m2_s']) for v in values]),
@@ -585,22 +745,44 @@ def _report(project):
     result.update(replica_ids=replica_ids, property_summary=properties,
         replica_seeds={f'replica_{i:02d}': seed for i, seed in replica_seeds(project, cfg).items()} if 'seed' in cfg else {},
         property_tables=dict(per_replica='replica_properties.csv', aggregate='property_summary.csv'))
-    result['network_builds'] = {replica: json.loads((project / replica / 'network_origin.json').read_text())
-        for replica in replica_ids if (project / replica / 'network_origin.json').is_file()}
-    write_json(project / 'summary.json', result)
-    text = ['# Network property calculation', '',
+    if kind == 'crosslink':
+        result['network_builds'] = {replica: json.loads((project / replica / 'network_origin.json').read_text())
+            for replica in replica_ids if (project / replica / 'network_origin.json').is_file()}
+    elif kind == 'monomer':
+        result['monomer_builds'] = {replica: json.loads((project / replica / 'build/done.json').read_text())
+            for replica in replica_ids if (project / replica / 'build/done.json').is_file()}
+    titles = dict(monomer=f'Monomer properties ({cfg.get("temperature_K", 0):g} K build)',
+                  crosslink='Crosslinked network properties', saved_network='Network property calculation')
+    text = [f'# {titles[kind]}', '',
         '**SMOKE: numbers are not physical property predictions.**' if cfg['smoke'] else
         'Inspect sampling and fit diagnostics before interpreting estimates.', '',
         f'Completed thermal replicas: {len(dry)}/{cfg["replicates"]}', '',
         f'NPT sampling checks passed: {result["dry_sampling_checks_passed"]}; Tg fit checks passed: {result["tg_fit_checks_passed"]}.', '']
+    if kind == 'crosslink':
+        from workflows.network_properties.construction import parent_project
+        options = cfg['crosslinking']
+        starts = (f'{options["activation_count"]} start sites' if options['activation_count'] is not None
+                  else f'start-site fraction {options["activation_fraction"]:g}')
+        text += [f'Monomer: [{parent_project(project, cfg).name}](../../report.md); {starts}; '
+                 f'crosslinked at {cfg["temperature_K"]:g} K from the relaxed monomer replica of the same number.', '']
     text += markdown(replica_ids, properties)
-    if result['network_builds']:
+    if result.get('network_builds'):
         text += ['', '**Network construction per replica**', '',
-            '| Replica | Seed | Atoms | Conversion | Target | Target reached |',
-            '|---|---:|---:|---:|---:|---|']
+            '| Replica | Seed | Atoms | Start sites | Conversion | Target | Target reached |',
+            '|---|---:|---:|---:|---:|---:|---|']
         for replica, build in result['network_builds'].items():
-            text.append(f'| {replica} | {build["seed"]} | {build["atoms"]} | {build["conversion"]:.6g} | '
-                        f'{build["target_conversion"]} | {build["target_reached"]} |')
+            text.append(f'| {replica} | {build["seed"]} | {build["atoms"]} | {build.get("activation_count")} | '
+                        f'{build["conversion"]:.6g} | {build["target_conversion"]} | {build["target_reached"]} |')
+    if result.get('monomer_builds'):
+        text += ['', '**Monomer build per replica**', '', '| Replica | Seed | Molecules | Atoms | Reactive rings |',
+                 '|---|---:|---:|---:|---:|']
+        for replica, build in result['monomer_builds'].items():
+            text.append(f'| {replica} | {build["seed"]} | {build["molecules"]} | {build["atoms"]} | {build["reactive_sites"]} |')
+    if kind == 'monomer' and children(project):
+        from workflows.network_properties.series import write_series
+        series = write_series(project)
+        result['crosslink_series'] = series['csv']
+        text += ['', '**Crosslink series**', ''] + series['markdown']
     if result['replica_seeds']:
         text += ['', 'Seeds: ' + ', '.join(f'{r}={seed}' for r,seed in result['replica_seeds'].items()) + '.']
     from workflows.network_properties.plots import render
@@ -608,8 +790,10 @@ def _report(project):
     for title, path in figures:
         text += ['', f'![{title}]({path})']
     text += ['', result['note'], '', 'Full method scope and limitations: summary.json.']
+    write_json(project / 'summary.json', result)
     (project / 'report.md').write_text('\n'.join(text) + '\n')
     print(f'Report: {project / "report.md"}', flush=True)
+    return result
 
 
 def initialize_project(project):
@@ -635,114 +819,183 @@ def _initialize_project(project):
     return cfg
 
 
+def _replicas(cfg, selected):
+    if selected is not None and not 1 <= selected <= cfg['replicates']:
+        raise ValueError(f'--replica must lie between 1 and {cfg["replicates"]}')
+    return [selected] if selected is not None else list(range(1, cfg['replicates'] + 1))
+
+
 def run(args):
     project = args.project.resolve()
     cfg = initialize_project(project)
+    kind = mode(cfg)
     selected = getattr(args, 'replica', None)
-    if selected is not None and not 1 <= selected <= cfg['replicates']:
-        raise ValueError(f'--replica must lie between 1 and {cfg["replicates"]}')
-    replicas = [selected] if selected is not None else range(1, cfg['replicates'] + 1)
-    for replica in replicas:
+    for replica in _replicas(cfg, selected):
         base = project / f'replica_{replica:02d}'
         seed = replica_seed(project, cfg, replica)
         # The lock comes first: a refused duplicate must not overwrite progress/error records.
         with file_lock(base / '.run.lock', blocking=False) as lock, replica_progress(base):
             write_json(base / 'execution.json', dict(replica=replica, seed=seed,
                 platform=cfg['platform'], cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES')))
-            if cfg.get('input_mode') == 'epoxy':
-                from workflows.network_properties.epoxy_pipeline import ensure_network
-                set_stage(base, 'crosslinking: pack, compress, equilibrate and react', seed=seed)
-                ensure_network(project, cfg, replica, lock)
+            if kind == 'monomer':
+                from workflows.network_properties.construction import ensure_monomer_build
+                set_stage(base, f'monomer build: pack, compress and relax at {cfg["temperature_K"]:g} K', seed=seed)
+                ensure_monomer_build(project, cfg, replica, lock)
+            elif kind == 'crosslink':
+                from workflows.network_properties.construction import ensure_crosslink
+                set_stage(base, 'crosslinking: start sites in the relaxed monomer, react', seed=seed)
+                ensure_crosslink(project, cfg, replica, lock)
             set_stage(base, 'dry properties: thermal history')
             dry_properties(project, cfg, replica)
-            if cfg['mechanical']:
-                from workflows.network_properties.mechanical import run_mechanical
-                set_stage(base, 'mechanical: elastic constants')
-                run_mechanical(base, cfg, seed)
+            if kind == 'monomer':
+                from workflows.network_properties.monomer import temperature_properties
+                set_stage(base, f'monomer properties at {cfg["temperature_K"]:g} K')
+                temperature_properties(project, cfg, replica)
             for spec in cfg['solvents']:
                 solvent_properties(project, cfg, replica, spec)
         if not getattr(args, 'defer_report', False):
             report(project)
+    if getattr(args, 'all', False):
+        if kind != 'monomer':
+            raise ValueError('--all runs a monomer project and its crosslink projects')
+        for child in children(project):
+            run(argparse.Namespace(project=child, replica=selected, defer_report=getattr(args, 'defer_report', False)))
+
+
+def mechanical(args):
+    """Optional elastic constants of finished crosslink/network replicas (relaxed 300 K structure)."""
+    from workflows.network_properties.mechanical import run_mechanical
+    project = args.project.resolve()
+    cfg = json.loads((project / 'project.json').read_text())
+    validate(cfg)
+    check_run_signature(project, cfg)
+    if mode(cfg) == 'monomer':
+        raise ValueError('mechanical properties are computed for crosslink or network projects, not the monomer liquid')
+    replicas = _replicas(cfg, getattr(args, 'replica', None))
+    missing = [r for r in replicas if not (project / f'replica_{r:02d}/relaxed_300K.structure.json').is_file()]
+    if missing:
+        raise RuntimeError(f'replicas {missing} have no relaxed 300 K structure yet; run the project first')
+    for replica in replicas:
+        base = project / f'replica_{replica:02d}'
+        with file_lock(base / '.run.lock', blocking=False), replica_progress(base):
+            set_stage(base, 'mechanical: elastic constants')
+            run_mechanical(base, cfg, replica_seed(project, cfg, replica))
+    if not getattr(args, 'defer_report', False):
+        report(project)
+
+
+def _construction_arguments(parser):
+    parser.add_argument('--chemistry', choices=('epoxy', 'oxetane'),
+                        help='ring-opening preset: activation/reaction YAMLs and default monomer (default epoxy)')
+    parser.add_argument('--activation-yaml', type=Path, help='own activation rules (default: the chemistry preset)')
+    parser.add_argument('--reactions-yaml', type=Path, help='own reaction rules (default: the chemistry preset)')
+
+
+def _thermal_arguments(parser, solvents=True):
+    parser.add_argument('--high-temperature', type=float,
+                        help='highest temperature of the thermal history in K (default 800)')
+    if solvents:
+        parser.add_argument('--solvent', action='append', default=[], metavar='NAME=SMILES')
+        parser.add_argument('--solvent-molecules', type=int, help='molecules per solvent (default 10)')
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest='command', required=True)
-    create = sub.add_parser('new', help='create a full construction pipeline, or supply a saved dry network')
-    create.add_argument('project', type=Path)
-    inputs = create.add_mutually_exclusive_group()
-    inputs.add_argument('--network', type=Path, help='reuse one saved network; omit to build one per replica')
-    inputs.add_argument('--smiles', '--epoxy-smiles', dest='epoxy_smiles',
-                        help='monomer SMILES; default TMP triglycidyl ether (epoxy) or OXT-221 (oxetane)')
-    from workflows.network_properties.epoxy_pipeline import CHEMISTRIES
-    create.add_argument('--chemistry', choices=sorted(CHEMISTRIES),
-                        help='ring-opening preset: activation/reaction YAMLs and default monomer (default epoxy)')
-    create.add_argument('--total-atoms', type=int, help='target atom count (default 20000, rounded above)')
-    create.add_argument('--atom-count-mode', choices=('above','nearest','floor','exact'))
-    create.add_argument('--cycles', type=int, help='maximum crosslinking cycles (default 5000)')
-    create.add_argument('--target-conversion', type=float, help='crosslinking target (default 0.995)')
-    starts = create.add_mutually_exclusive_group()
-    starts.add_argument('--activation-count', type=int, help='number of start sites; 0 = unreacted monomer')
-    starts.add_argument('--activation-fraction', type=float,
-                        help='fraction of ring sites activated (0 <= f < 1); 0 = unreacted monomer')
-    create.add_argument('--max-reactions-per-cycle', type=int)
-    create.add_argument('--final-relaxation-steps', type=int,
-                        help='after crosslinking: NVT steps at 0.1 fs before the final MD (default 1000)')
-    create.add_argument('--final-md-steps', type=int,
-                        help='after crosslinking: NPT steps at 1 fs and 1 atm before saving (default 1000000 = 1 ns)')
-    create.add_argument('--packing-density', type=float,
-                        help='initial packing density in g/cm3 before compression (default 0.5)')
-    create.add_argument('--compression-pressure-mpa', type=float,
-                        help='pre-crosslinking compression NPT pressure in MPa (default 200)')
-    create.add_argument('--compression-steps', type=int,
-                        help='compression NPT steps at 1 fs (default 50000 = 50 ps; 0 disables)')
-    create.add_argument('--reaction-cutoff', type=float,
-                        help='initial reaction search distance in angstrom (default 4, capped by the maximum)')
-    create.add_argument('--max-reaction-cutoff', type=float,
-                        help='largest search distance after automatic growth, angstrom (default 6)')
-    create.add_argument('--fixed-reaction-cutoff', action='store_true',
-                        help='keep the search distance at --reaction-cutoff')
-    create.add_argument('--reaction-minimization-iterations', type=int,
-                        help='crosslinking minimization iterations, initial and after each reaction (default 2000)')
-    create.add_argument('--reaction-minimization-radius', type=float,
-                        help='minimize only atoms within this many angstrom of each reaction (default 12; 0 whole system)')
-    create.add_argument('--post-reaction-md-steps', type=int,
-                        help='NVT steps at 0.1 fs after minimization, before reactions are committed (default 0)')
-    create.add_argument('--relaxation-stages', type=relaxation_stages_argument,
-                        help='post-reaction MD per cycle: JSON text or a JSON/YAML file (default NVT 0.1 fs x 10000, NPT 1 fs x 1000)')
-    create.add_argument('--stop-after-idle-cycles', type=int,
-                        help='end crosslinking after this many zero-reaction cycles at the largest search distance (default 200; 0 never)')
-    create.add_argument('--template-workers', type=int,
-                        help='processes computing new reaction templates in parallel (default 4; 1 serial)')
-    create.add_argument('--save-trajectory', action='store_true', help='save crosslinking trajectory (default OFF)')
-    create.add_argument('--remove-sol-fraction', action='store_true',
-                        help='like development: keep only the network that percolates along all of x, y and z, '
-                             'dropping unreacted monomers and unattached oligomers (default OFF)')
-    create.add_argument('--activation-yaml', type=Path)
-    create.add_argument('--reactions-yaml', type=Path)
-    create.add_argument('--platform', choices=('CUDA','CPU','Reference'), default='CUDA')
-    create.add_argument('--replicates', type=int, help='number of replicas (default 4; smoke default 1)')
-    create.add_argument('--seed', type=int, default=31415)
-    create.add_argument('--solvent', action='append', default=[], metavar='NAME=SMILES')
-    create.add_argument('--solvent-molecules', type=int, default=10)
-    create.add_argument('--skip-mechanical', action='store_true')
-    create.add_argument('--high-temperature', type=float,
-                        help='highest temperature of the thermal history in K (default 800). Uncrosslinked '
-                             'monomers boil there at 1 atm; use e.g. 500-600 for them')
-    create.add_argument('--smoke', action='store_true')
-    create.set_defaults(action=new)
-    for name, action in [('run',run), ('report',lambda a: report(a.project))]:
-        cmd = sub.add_parser(name)
-        cmd.add_argument('project', type=Path)
-        if name == 'run':
-            cmd.add_argument('--replica', type=int, help='run only this replica (1-based)')
-            cmd.add_argument('--defer-report', action='store_true', help=argparse.SUPPRESS)
-        cmd.set_defaults(action=action)
+
+    mono = sub.add_parser('monomer', help='create a monomer project (build at T, Tg, 300 K and T properties)')
+    mono.add_argument('project', type=Path)
+    mono.add_argument('--smiles', help='monomer SMILES; default TMP triglycidyl ether (epoxy) or OXT-221 (oxetane)')
+    _construction_arguments(mono)
+    mono.add_argument('--temperature', type=float, default=monomer_defaults()['temperature_K'],
+                      help='build, T properties and later crosslinking temperature in K (default 363.15 = 90 C)')
+    mono.add_argument('--replicates', type=int, help='independent monomer packings (default 4; smoke 1)')
+    mono.add_argument('--seed', type=int, default=31415)
+    mono.add_argument('--platform', choices=('CUDA', 'CPU'), default='CUDA')
+    mono.add_argument('--total-atoms', type=int, help='target atom count (default 20000, rounded above)')
+    mono.add_argument('--atom-count-mode', choices=('above', 'nearest', 'floor', 'exact'))
+    mono.add_argument('--packing-density', type=float, help='initial packing density in g/cm3 (default 0.5)')
+    mono.add_argument('--compression-pressure-mpa', type=float, help='compression NPT pressure in MPa (default 200)')
+    mono.add_argument('--compression-steps', type=int, help='compression NPT steps at 1 fs (default 50000; 0 disables)')
+    mono.add_argument('--equilibration-steps', type=int, help='1 atm NPT steps at T and 1 fs after compression (default 1000000)')
+    _thermal_arguments(mono, solvents=False)
+    mono.add_argument('--smoke', action='store_true')
+    mono.set_defaults(action=new_monomer)
+
+    cross = sub.add_parser('crosslink', help='create crosslink projects (one per start-site density) of a monomer project')
+    cross.add_argument('monomer', type=Path, help='monomer project directory')
+    starts = cross.add_mutually_exclusive_group(required=True)
+    starts.add_argument('--activation-fraction', type=float, nargs='+', help='fractions of the rings activated (0 <= f < 1)')
+    starts.add_argument('--activation-count', type=int, nargs='+', help='numbers of start sites')
+    cross.add_argument('--name', help='directory name under crosslinks/ for a single density (default af<f> or n<count>)')
+    cross.add_argument('--replicates', type=int, help='replicas (default and maximum: the monomer replicates)')
+    cross.add_argument('--seed', type=int, help='base seed (default: the monomer seed, so start sites are nested)')
+    cross.add_argument('--platform', choices=('CUDA', 'CPU'), help='default: the monomer platform')
+    cross.add_argument('--cycles', type=int, help='maximum crosslinking cycles (default 5000)')
+    cross.add_argument('--target-conversion', type=float, help='crosslinking target (default 0.995)')
+    cross.add_argument('--max-reactions-per-cycle', type=int)
+    cross.add_argument('--equilibration-steps', type=int,
+                       help='NPT steps at T and 1 fs after the start sites are added (default 100000 = 100 ps)')
+    cross.add_argument('--final-relaxation-steps', type=int,
+                       help='after crosslinking: NVT steps at 0.1 fs before the final MD (default 1000)')
+    cross.add_argument('--final-md-steps', type=int,
+                       help='after crosslinking: NPT steps at 1 fs and 1 atm before saving (default 1000000 = 1 ns)')
+    cross.add_argument('--reaction-cutoff', type=float,
+                       help='initial reaction search distance in angstrom (default 4, capped by the maximum)')
+    cross.add_argument('--max-reaction-cutoff', type=float, help='largest reaction search distance in angstrom (default 6)')
+    cross.add_argument('--fixed-reaction-cutoff', action='store_true', help='keep the reaction cutoff fixed')
+    cross.add_argument('--reaction-minimization-iterations', type=int,
+                       help='minimization iterations after each reaction (default 2000)')
+    cross.add_argument('--reaction-minimization-radius', type=float,
+                       help='radius in angstrom minimized after reactions (default 12; 0 = whole system)')
+    cross.add_argument('--post-reaction-md-steps', type=int,
+                       help='NVT steps after the post-reaction minimization, before commit (default 0)')
+    cross.add_argument('--relaxation-stages', type=relaxation_stages_argument,
+                       help='post-reaction MD stages: JSON text or a JSON/YAML file (see crosslinking/README.md)')
+    cross.add_argument('--stop-after-idle-cycles', type=int,
+                       help='stop after this many reactionless cycles at the largest cutoff (default 200; 0 disables)')
+    cross.add_argument('--template-workers', type=int, help='parallel workers for new reaction templates (default 4)')
+    cross.add_argument('--save-trajectory', action='store_true', help='save the OVITO trajectory and cycle structures')
+    cross.add_argument('--remove-sol-fraction', action='store_true',
+                       help='keep only the network percolating in three dimensions, dropping unreacted monomers '
+                            'and unattached oligomers (default OFF)')
+    _thermal_arguments(cross)
+    cross.set_defaults(action=new_crosslink)
+
+    network = sub.add_parser('network', help='create a project for a saved dry network (Tg, 300 K, solvents)')
+    network.add_argument('project', type=Path)
+    network.add_argument('--network', type=Path, required=True, help='saved-charge structure JSON')
+    network.add_argument('--replicates', type=int)
+    network.add_argument('--seed', type=int, default=31415)
+    network.add_argument('--platform', choices=('CUDA', 'CPU'), default='CUDA')
+    _thermal_arguments(network)
+    network.add_argument('--smoke', action='store_true')
+    network.set_defaults(action=new_network)
+
+    execute = sub.add_parser('run', help='run replicas locally (one after another)')
+    execute.add_argument('project', type=Path)
+    execute.add_argument('--replica', type=int, help='run only this replica (1-based)')
+    execute.add_argument('--all', action='store_true', help='monomer project: also run every crosslink project')
+    execute.add_argument('--defer-report', action='store_true', help=argparse.SUPPRESS)
+    execute.set_defaults(action=run)
+    elastic = sub.add_parser('mechanical', help='optional elastic constants of finished crosslink/network replicas')
+    elastic.add_argument('project', type=Path)
+    elastic.add_argument('--replica', type=int, help='only this replica (1-based)')
+    elastic.add_argument('--defer-report', action='store_true', help=argparse.SUPPRESS)
+    elastic.set_defaults(action=mechanical)
+    summary = sub.add_parser('report', help='rewrite report.md and the property tables (no MD)')
+    summary.add_argument('project', type=Path)
+    summary.set_defaults(action=lambda a: report(a.project))
+
     from workflows.network_properties.gpu_jobs import reseed, submit, status
     launch = sub.add_parser('submit', help='launch replica jobs on selected local GPUs')
     launch.add_argument('project', type=Path)
     launch.add_argument('--gpus', help='physical GPU indices, e.g. 0,2; default: all visible GPUs')
     launch.add_argument('--dry-run', action='store_true', help='show the GPU/seed plan without launching jobs')
+    launch.add_argument('--mechanical', action='store_true',
+                        help='queue the optional elastic constants of finished replicas instead')
+    launch.add_argument('--monomer-only', action='store_true',
+                        help='monomer project: queue only its own replicas, not the crosslink projects')
     launch.set_defaults(action=submit)
     retry = sub.add_parser('reseed', help='give failed replicas a new seed and archive the failed attempt')
     retry.add_argument('project', type=Path)
@@ -753,8 +1006,8 @@ def main(argv=None):
     retry.add_argument('--submit', action='store_true', help='submit the reseeded replicas to the GPUs right away')
     retry.add_argument('--gpus', help='with --submit: physical GPU indices, e.g. 0,2')
     retry.add_argument('--dry-run', action='store_true', help='show the new seeds without changing anything')
-    retry.set_defaults(action=reseed)
-    check = sub.add_parser('status', help='show local GPU job states and logs')
+    retry.set_defaults(action=reseed, mechanical=False, monomer_only=False)
+    check = sub.add_parser('status', help='show replica stages and GPU job states (monomer: with its crosslinks)')
     check.add_argument('project', type=Path)
     check.set_defaults(action=status)
     comparison = sub.add_parser('collect', help='summarize all project directories under a parent directory')
@@ -765,13 +1018,18 @@ def main(argv=None):
     try:
         args.action(args)
     except (ValueError, OSError, RuntimeError, ImportError, KeyError) as exc:
-        if args.command == 'run':
+        if args.command in ('run', 'mechanical'):
             # Keep the traceback: job logs are the only record of where a detached run stopped.
             import traceback
             traceback.print_exc()
         print(f'network_properties: {exc}', file=sys.stderr)
         return 1
     return 0
+
+
+def monomer_defaults():
+    from workflows.network_properties.monomer import DEFAULTS as values
+    return values
 
 
 if __name__ == '__main__':

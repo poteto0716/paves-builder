@@ -84,11 +84,46 @@ def plot_tg(base, dry=None, path=None):
     return path
 
 
+def plot_temperature_stage(directory, project):
+    """Monomer at T: NPT density trace and the reactive-ring MSD (log-log, with the fitted window)."""
+    import matplotlib
+    matplotlib.use('Agg')
+    from matplotlib import pyplot as plt
+    result = json.loads((directory/'result.json').read_text())
+    rows = json.loads((directory/'03_production/samples.json').read_text())
+    fig, axes = plt.subplots(1,2,figsize=(10,3.5))
+    axes[0].plot([r['time_ps']/1000 for r in rows],[r['density_g_cm3'] for r in rows],lw=.7)
+    axes[0].set(xlabel='Time / ns',ylabel='Density / g cm$^{-3}$',
+                title=f'{result["temperature_K"]:g} K NPT: check stationary fluctuations')
+    rings = result.get('reactive_rings')
+    msd = directory/'03_production/reactive_rings/reactive_ring_msd.csv'
+    if rings and msd.is_file():
+        with msd.open() as f:
+            data = [(float(r['lag_ps']),float(r['msd_A2'])) for r in csv.DictReader(f)]
+        data = [(t,m) for t,m in data if t > 0 and m > 0]
+        if data:
+            axes[1].loglog([t for t,_ in data],[m for _,m in data],lw=1)
+        if rings.get('fit_window_ps'):
+            for edge in rings['fit_window_ps']:
+                axes[1].axvline(edge,c='gray',ls=':')
+        alpha = rings.get('msd_exponent_alpha')
+        axes[1].set(title=f'{rings["ring"].capitalize()} ring MSD' + (f' (alpha {alpha:.2f})' if alpha is not None else ''))
+    axes[1].set(xlabel='Lag time / ps',ylabel='MSD / $\\AA^2$')
+    if result['smoke']:
+        fig.suptitle('SMOKE ONLY — no physical interpretation')
+    fig.tight_layout()
+    path = directory/'temperature_diagnostics.png'
+    fig.savefig(path,dpi=160)
+    plt.close(fig)
+    return (f'{directory.parent.name}: {result["temperature_K"]:g} K density and ring MSD', str(path.relative_to(project)))
+
+
 def render(project):
     import matplotlib
     matplotlib.use('Agg')
     from matplotlib import pyplot as plt
     project = Path(project)
+    cfg = json.loads((project/'project.json').read_text())
     figures = []
     def save(fig, path, title):
         fig.tight_layout()
@@ -120,6 +155,10 @@ def render(project):
         save(fig,base/'thermal_diagnostics.png',f'{base.name}: cooling and density')
         figures.append((f'{base.name}: Tg, temperature-density and temperature-volume',
                         str(plot_tg(base, dry).relative_to(project))))
+        if cfg.get('input_mode') == 'monomer':
+            from workflows.network_properties.monomer import label
+            if (base/label(cfg)/'result.json').is_file():
+                figures.append(plot_temperature_stage(base/label(cfg), project))
         network = dry.get('network')
         if network and network.get('effective_strands'):
             from workflows.network_properties.network_graph import plot_strand_histogram, write_strand_csv

@@ -81,10 +81,18 @@ def collect(project, cfg):
     A separate checked_* summary includes only estimates passing existing checks.
     """
     project = Path(project)
+    mode = cfg.get('input_mode', 'saved_network')
     replica_ids = [f'replica_{i:02d}' for i in range(1, cfg['replicates'] + 1)]
     properties = {}
     construction_checks = {replica: bool((_read(project / replica / 'network_origin.json') or {}).get('target_reached'))
-                           for replica in replica_ids} if cfg.get('input_mode') == 'epoxy' else {}
+                           for replica in replica_ids} if mode == 'crosslink' else {}
+    parent = None
+    if mode == 'crosslink':
+        from workflows.network_properties.construction import parent_project
+        parent = parent_project(project, cfg)
+    from workflows.network_properties.monomer import ring_label
+    ring = ring_label(cfg)
+    mechanical_present = any((project / replica / 'mechanical/result.json').is_file() for replica in replica_ids)
 
     def add(replica, source, data, group, key, label, unit, value, checked, display=True):
         finite = isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
@@ -95,45 +103,45 @@ def collect(project, cfg):
             'smoke' if smoke else 'checks_passed' if checked else 'unchecked')
         entry = properties.setdefault(key, dict(label=label, unit=unit, group=group,
                                                  display=display, replicas={}))
-        entry['replicas'][replica] = dict(value=value, checks_passed=checked, status=status,
-                                         source=str(source.relative_to(project)))
+        try:
+            where = str(source.relative_to(project))
+        except ValueError:
+            where = str(source)
+        entry['replicas'][replica] = dict(value=value, checks_passed=checked, status=status, source=where)
 
     for replica in replica_ids:
         base = project / replica
-        if cfg.get('input_mode') == 'epoxy':
+        temperature = None
+        if mode == 'monomer':
+            from workflows.network_properties.monomer import label as temperature_label
+            source = base / 'build/done.json'
+            build = _read(source)
+            for key, label, unit in (('molecules', 'Monomer molecules', 'count'), ('atoms', 'Atoms', 'count'),
+                                     ('reactive_sites', f'{ring} rings', 'count')):
+                add(replica, source, build, 'Monomer build', f'build.{key}', label, unit, _at(build, key), True)
+            temperature = _read(base / temperature_label(cfg) / 'result.json')
+            temperature_source = base / temperature_label(cfg) / 'result.json'
+        if mode == 'crosslink':
             source = base / 'network_origin.json'
             build = _read(source)
             rows = [('conversion', 'Crosslink conversion', '1'),
                     ('epoxide_consumption_including_activation', 'Ring consumption including activation', '1'),
-                    ('activation_density_nm3', 'Initial activations per volume (before crosslinking)', 'nm^-3')]
-            rows += [('reference_before_crosslinking.volume_nm3', 'Cell volume before reaction (reference temperature, default 300 K)', 'nm^3'),
-                     ('kinetic_chains.number_average_epoxide_units',
-                      'Kinetic chain length per active end, number average', 'epoxide units'),
-                     ('kinetic_chains.weight_average_epoxide_units',
-                      'Kinetic chain length per active end, weight average', 'epoxide units'),
-                     ('kinetic_chains.dispersity', 'Kinetic chain length dispersity', '1'),
-                     ('kinetic_chains.max_epoxide_units', 'Longest kinetic chain', 'epoxide units')]
+                    ('activation_count', 'Start sites', 'count'),
+                    ('actual_activation_fraction', 'Start sites / rings', '1'),
+                    ('activation_density_nm3', 'Start sites per volume (before crosslinking)', 'nm^-3'),
+                    ('activation_density_mmol_cm3', 'Start sites per volume (before crosslinking)', 'mmol/cm^3'),
+                    ('kinetic_chains.number_average_epoxide_units',
+                     'Kinetic chain length per active end, number average', 'ring units'),
+                    ('kinetic_chains.weight_average_epoxide_units',
+                     'Kinetic chain length per active end, weight average', 'ring units'),
+                    ('kinetic_chains.dispersity', 'Kinetic chain length dispersity', '1'),
+                    ('kinetic_chains.max_epoxide_units', 'Longest kinetic chain', 'ring units')]
             if cfg.get('crosslinking', {}).get('remove_sol_fraction'):
-                rows.append(('gel_epoxide_conversion', 'Ring conversion of the gel (sol removed)', '1'))
+                rows += [('gel_epoxide_conversion', 'Ring conversion of the gel (sol removed)', '1'),
+                         ('sol_mass_fraction', 'Removed sol mass fraction', '1')]
             for key, label, unit in rows:
                 add(replica, source, build, 'Network construction', f'crosslinking.{key}', label, unit,
                     _at(build, *key.split('.')), _at(build, 'target_reached'))
-            # Equilibrium before any reaction, at the reaction temperature (crosslinking pre_reaction/).
-            pre = _at(build, 'pre_reaction_epoxides')
-            cutoffs = [f'{c:g}' for c in (_at(pre, 'contact_cutoffs_A') or [])]
-            group = f"Pre-reaction equilibrium ({_at(pre, 'temperature_K') or 0:g} K)" if pre else 'Pre-reaction equilibrium'
-            pre_rows = [(('epoxide_number_density_nm3', 'mean'), 'Epoxide number density', 'nm^-3')]
-            for cut in cutoffs:
-                pre_rows += [(('by_cutoff_A', cut, 'coordination_number', 'mean'), f'Epoxide coordination number ({cut} A)', '1'),
-                             (('by_cutoff_A', cut, 'largest_cluster_fraction', 'mean'),
-                              f'Largest epoxide contact cluster fraction ({cut} A)', '1')]
-            pre_rows += [(('msd_final_A2',), 'Epoxide MSD at the end of sampling', 'A^2'),
-                         (('diffusion_coefficient_m2_s',), 'Epoxide diffusion coefficient', 'm^2/s'),
-                         (('msd_exponent_alpha',), 'Epoxide MSD exponent alpha', '1')]
-            if pre:
-                for path, label, unit in pre_rows:
-                    add(replica, source, build, group, 'pre_reaction.' + '.'.join(path), label, unit,
-                        _at(pre, *path), _at(build, 'target_reached'))
         source = base / 'dry_result.json'
         dry = _read(source)
         for key, label, unit in COOLING:
@@ -142,17 +150,21 @@ def collect(project, cfg):
         for key, label, unit in NPT:
             add(replica, source, dry, '300 K thermodynamics', f'npt.{key}', label, unit,
                 _at(dry, 'npt', 'estimates', key), _at(dry, 'npt', 'sampling_checks_passed'))
-        # Film retention: 300 K NPT volume after crosslinking (sol removed when requested) and the
-        # thermal history, over the cell volume when the reactions started.
-        if cfg.get('input_mode') == 'epoxy':
-            # Both volumes at 300 K and 1 atm, so thermal expansion does not enter: the reference NPT of
-            # the packed monomer before heating to the reaction temperature (crosslinking
-            # reference_volume.csv) and the dry NPT of the crosslinked network after the thermal history.
-            reference = _at(_read(base / 'network_origin.json'), 'reference_before_crosslinking')
-            start = _at(reference, 'volume_nm3') if _at(reference, 'temperature_K') == 300. else None
+        if mode == 'monomer':
+            # Rings / mean 300 K NPT volume; the ring count is exact, the volume carries the sampling check.
+            for unit, suffix in (('nm^-3', 'nm3'), ('mmol/cm^3', 'mmol_cm3')):
+                add(replica, temperature_source, temperature, '300 K thermodynamics', f'rings.number_density_300K_{suffix}',
+                    f'{ring} number density (300 K)', unit,
+                    _at(temperature, 'reactive_ring_density', f'number_density_300K_{suffix}'),
+                    _at(dry, 'npt', 'sampling_checks_passed'))
+        if mode == 'crosslink':
+            # Film retention: 300 K NPT volume of the crosslinked network (sol removed when requested,
+            # after the thermal history) over the 300 K NPT volume of the monomer replica it started from.
+            # Both at 300 K and 1 atm, so thermal expansion does not enter.
+            start = _at(_read(parent / replica / 'dry_result.json'), 'npt', 'volume_nm3_mean')
             relaxed = _at(dry, 'npt', 'volume_nm3_mean')
             add(replica, source, dry, '300 K structure', 'structure.film_retention_volume_ratio',
-                'Film retention, V(300 K, crosslinked) / V(300 K, before reaction)', '1',
+                'Film retention, V(300 K, crosslinked) / V(300 K, monomer)', '1',
                 relaxed / start if isinstance(relaxed, Real) and isinstance(start, Real) and start > 0 else None,
                 _at(dry, 'npt', 'sampling_checks_passed'))
         add(replica, source, dry, '300 K structure', 'structure.point_probe_void_fraction',
@@ -162,7 +174,7 @@ def collect(project, cfg):
         network = _at(dry, 'network')
         # A result from an older definition stays visible but never counts as checked.
         network_current = _at(network, 'method_version') == METHOD_VERSION
-        for path, label, unit in (
+        for path, label, unit in (() if mode == 'monomer' else (
                 (('strand_density_nu_e_mmol_cm3',), 'Effective strand density nu_e', 'mmol/cm^3'),
                 (('effective_strands',), 'Effective strands', 'count'),
                 (('Mc_g_mol',), 'Mc, total cell mass / strands', 'g/mol'),
@@ -185,7 +197,7 @@ def collect(project, cfg):
                 (('polar_groups_mmol_cm3', 'ether_O'), 'Ether O', 'mmol/cm^3'),
                 (('polar_groups_mmol_cm3', 'epoxide_rings'), 'Unreacted epoxide', 'mmol/cm^3'),
                 (('polar_groups_mmol_cm3', 'oxetane_rings'), 'Unreacted oxetane', 'mmol/cm^3'),
-                (('polar_groups_mmol_cm3', 'aromatic_rings'), 'Aromatic rings', 'mmol/cm^3')):
+                (('polar_groups_mmol_cm3', 'aromatic_rings'), 'Aromatic rings', 'mmol/cm^3'))):
             # Topological counts of a fixed graph; no sampling check applies.
             value = _at(network, *path)
             if path[0] == 'polar_groups_mmol_cm3' and network is not None and value is None:
@@ -203,7 +215,41 @@ def collect(project, cfg):
                     _at(dry, 'nvt', 'dielectric_tensor_fixed_charge', i, j),
                     _at(dry, 'nvt', 'sampling_checks_passed'), display=False)
 
-        if cfg.get('mechanical', True):
+        if mode == 'monomer':
+            t = float(cfg['temperature_K'])
+            group = f'{t:g} K monomer liquid (after the thermal history)'
+            checked = _at(temperature, 'npt', 'sampling_checks_passed')
+            for key, label, unit in NPT:
+                add(replica, temperature_source, temperature, group, f'at_T.npt.{key}',
+                    label.replace('(300 K)', f'({t:g} K)'), unit, _at(temperature, 'npt', 'estimates', key), checked)
+            for unit, suffix in (('nm^-3', 'nm3'), ('mmol/cm^3', 'mmol_cm3')):
+                add(replica, temperature_source, temperature, group, f'at_T.rings.number_density_{suffix}',
+                    f'{ring} number density ({t:g} K)', unit,
+                    _at(temperature, 'reactive_ring_density', f'number_density_{t:g}K_{suffix}'), checked)
+            rings = _at(temperature, 'reactive_rings')
+            for cut in [f'{float(c):g}' for c in cfg.get('ring_contact_cutoffs_A', [])]:
+                add(replica, temperature_source, temperature, group, f'at_T.rings.coordination_{cut}A',
+                    f'{ring} coordination number ({cut} A)', '1',
+                    _at(rings, 'by_cutoff_A', cut, 'coordination_number', 'mean'), checked)
+                add(replica, temperature_source, temperature, group, f'at_T.rings.largest_cluster_{cut}A',
+                    f'Largest {ring.lower()} contact cluster fraction ({cut} A)', '1',
+                    _at(rings, 'by_cutoff_A', cut, 'largest_cluster_fraction', 'mean'), checked)
+            alpha = _at(rings, 'msd_exponent_alpha')
+            # D needs the diffusive regime: the log-log MSD slope over the fit window near 1.
+            diffusive = isinstance(alpha, Real) and .8 <= alpha <= 1.2
+            add(replica, temperature_source, temperature, group, 'at_T.rings.msd_final_A2',
+                f'{ring} MSD at the end of sampling', 'A^2', _at(rings, 'msd_final_A2'), checked)
+            add(replica, temperature_source, temperature, group, 'at_T.rings.diffusion_coefficient_m2_s',
+                f'{ring} diffusion coefficient', 'm^2/s', _at(rings, 'diffusion_coefficient_m2_s'),
+                bool(checked and diffusive))
+            add(replica, temperature_source, temperature, group, 'at_T.rings.msd_exponent_alpha',
+                f'{ring} MSD exponent alpha', '1', alpha, checked)
+            for key, label, unit in (('Cv_direct_J_kg_K', f'Cv (direct NVT, {t:g} K)', 'J/(kg K)'),
+                    ('dielectric_isotropic_fixed_charge', f'Dielectric response (fixed charge, {t:g} K)', '1')):
+                add(replica, temperature_source, temperature, group, f'at_T.nvt.{key}', label, unit,
+                    _at(temperature, 'nvt', key), _at(temperature, 'nvt', 'sampling_checks_passed'))
+
+        if mechanical_present:
             source = base / 'mechanical/result.json'
             mechanical = _read(source) if result_current(base) else None
             checked = bool(_at(mechanical, 'sampling_checks_passed') and _at(mechanical, 'isotropic', 'stable'))
@@ -279,7 +325,7 @@ def markdown(replica_ids, properties):
         'Means/SD/SEM below include all available finite estimates. An asterisk marks an estimate '
         'whose checks have not passed (including smoke runs). CSV checked_* columns summarize only '
         'estimates passing checks. Missing estimates remain blank; they are never treated as zero.', '',
-        'For independently constructed epoxy, the requested crosslink conversion must also be reached '
+        'For crosslinked replicas, the requested crosslink conversion must also be reached '
         'for a replica to count as checks-passed.', '',
         'SD is the sample standard deviation across replicas; SEM = SD / sqrt(n). '
         'Both are undefined for a single available replica. Tensor components are included in the CSV files.']

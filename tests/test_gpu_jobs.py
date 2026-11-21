@@ -57,8 +57,9 @@ class GPUJobTests(unittest.TestCase):
         source.write_text(json.dumps(dict(graphs=[dict(atoms=[{'partial_charge':0.}])],
             positions=[[0,0,0]],box_vectors=[[3,0,0],[0,3,0],[0,0,3]])))
         output=self.project/'smoke'
-        self.assertEqual(main(['new',str(output),'--network',str(source),'--platform','CUDA',
-                               '--replicates','3','--smoke']),0)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['network',str(output),'--network',str(source),'--platform','CUDA',
+                                   '--replicates','3','--smoke']),0)
         self.assertEqual(json.loads((output/'project.json').read_text())['replicates'],3)
 
     def test_duplicate_submission_is_rejected_before_launch(self):
@@ -273,6 +274,57 @@ raise SystemExit(7 if replica==fail else 0)
         with file_lock(self.project/'replica_03/.run.lock'), redirect_stdout(io.StringIO()):
             with self.assertRaisesRegex(RuntimeError,'running'):
                 jobs.reseed(Namespace(**{**vars(args()),'replica':[3],'force':True}))
+
+    def test_monomer_submission_runs_crosslink_replicas_after_their_monomer_replica(self):
+        from workflows.network_properties import monomer
+        root = self.project/'TMPTGE'
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(['monomer',str(root),'--platform','CUDA','--replicates','2','--seed','100','--smoke']),0)
+            self.assertEqual(main(['crosslink',str(root),'--activation-fraction','0.1']),0)
+        cfg = json.loads((root/'project.json').read_text())
+        plan = jobs.plan(root,cfg,self.devices)
+        self.assertEqual([(j['name'],j['replica'],j['seed']) for j in plan['jobs']],
+                         [('.',1,101),('.',2,102),('crosslinks/af0.1',1,101),('crosslinks/af0.1',2,102)])
+        self.assertEqual(plan['jobs'][3]['after'],dict(project=str(root),replica=2))
+        self.assertEqual(len(plan['configurations']),2)
+        alone = jobs.plan(root,cfg,self.devices,monomer_only=True)
+        self.assertEqual([(j['name'],j['replica']) for j in alone['jobs']],[('.',1),('.',2)])
+        self.assertEqual(list(alone['configurations']),[str(root)])
+        with self.assertRaisesRegex(ValueError,'monomer-only'):
+            jobs.plan(root/'crosslinks/af0.1',json.loads((root/'crosslinks/af0.1/project.json').read_text()),
+                      self.devices,monomer_only=True)
+        # Fake workers: a monomer replica writes its completion files (replica 2 fails); a crosslink
+        # replica exits 9 if its monomer replica is not complete.
+        script = """import json,sys,time
+from pathlib import Path
+project=Path(sys.argv[1]); replica=int(sys.argv[2]); T=sys.argv[3]
+cfg=json.loads((project/'project.json').read_text()); base=project/f'replica_{replica:02d}'
+root=project if cfg['input_mode']=='monomer' else (project/cfg['parent']).resolve()
+with open(root/'order.txt','a') as fh: fh.write(f"{cfg['input_mode']} {replica}\\n")
+time.sleep(.05)
+if cfg['input_mode']=='monomer':
+    if replica==2: raise SystemExit(7)
+    for p in ('build/done.json','dry_result.json',f'{T}/result.json',f'{T}/relaxed_{T}.structure.json'):
+        (base/p).parent.mkdir(parents=True,exist_ok=True); (base/p).write_text('{}')
+else:
+    if not (root/f'replica_{replica:02d}/{T}/result.json').is_file(): raise SystemExit(9)
+"""
+        factory = lambda project,replica:[sys.executable,'-c',script,str(project),str(replica),monomer.label(cfg)]
+        path = root/'submission.json'
+        path.write_text(json.dumps(plan))
+        result = jobs.dispatch(path,command_factory=factory,poll_interval=.01,refresh_report=False)
+        states = [(j['name'],j['replica'],j['state']) for j in result['jobs']]
+        self.assertEqual(states,[('.',1,'completed'),('.',2,'failed'),
+                                 ('crosslinks/af0.1',1,'completed'),('crosslinks/af0.1',2,'blocked')])
+        self.assertIn('replica_02 failed',result['jobs'][3]['error'])
+        self.assertEqual(result['state'],'failed')
+        order = (root/'order.txt').read_text().split('\n')
+        self.assertLess(order.index('monomer 1'),order.index('crosslink 1'))
+        self.assertNotIn('crosslink 2',order)
+        with redirect_stdout(io.StringIO()) as output:
+            jobs.status(Namespace(project=root))
+        self.assertIn('crosslinks/af0.1 [crosslink]: 0/2 replicas complete',output.getvalue())
+        self.assertIn('blocked',output.getvalue())
 
     def test_changed_configuration_fails_before_starting_any_worker(self):
         plan=jobs.plan(self.project,self.cfg,self.devices)

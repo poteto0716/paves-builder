@@ -12,7 +12,8 @@ from workflows.network_properties.execution import check_run_signature, configur
 from workflows.network_properties.replica_summary import collect as collect_replicas
 
 MARKER = '.network_properties_collection.json'
-META = ['project', 'project_directory', 'input_mode', 'epoxy_smiles', 'base_seed',
+META = ['project', 'project_directory', 'input_mode', 'monomer_project', 'smiles', 'chemistry',
+        'temperature_K', 'activation_count', 'activation_fraction', 'base_seed',
         'replicates_requested', 'replicates_completed', 'project_state', 'smoke',
         'target_total_atoms', 'target_conversion', 'cooling_rate_K_ns', 'pressure_atm',
         'input_sha256', 'configuration_sha256']
@@ -58,10 +59,11 @@ def _discover(root):
             dirs.clear()
             continue
         if (isinstance(cfg, dict) and 'replicates' in cfg and 'solvents' in cfg
-                and ('network' in cfg or cfg.get('input_mode') == 'epoxy')):
+                and ('network' in cfg or cfg.get('input_mode') in ('monomer', 'crosslink'))):
             projects.append(path)
-            # Never walk the potentially large trajectories inside a project.
-            dirs.clear()
+            # Never walk the potentially large trajectories inside a project; a monomer
+            # project holds its crosslink projects under crosslinks/.
+            dirs[:] = ['crosslinks'] if cfg.get('input_mode') == 'monomer' and 'crosslinks' in dirs else []
     return sorted(projects), errors
 
 
@@ -81,14 +83,24 @@ def _project(root, project):
         ids, properties = collect_replicas(project, cfg)
         completed = sum(replica_complete(project, cfg, i) for i in range(1, cfg['replicates'] + 1))
         available = any(p['n_available'] for p in properties.values())
-        build = cfg.get('crosslinking', {})
+        mode = cfg.get('input_mode', 'saved_network')
+        build = cfg.get('build', {})
+        crosslinking = cfg.get('crosslinking', {})
+        monomer = project
+        if mode == 'crosslink':
+            from workflows.network_properties.construction import parent_project
+            monomer = parent_project(project, cfg)
+            build = json.loads((monomer / 'project.json').read_text()).get('build', {})
         metadata = dict(project=project.relative_to(root).as_posix(), project_directory=str(project),
-            input_mode=cfg.get('input_mode', 'saved_network'), epoxy_smiles=build.get('smiles'),
+            input_mode=mode, monomer_project=monomer.relative_to(root).as_posix() if mode != 'saved_network' else None,
+            smiles=build.get('smiles'), chemistry=cfg.get('chemistry'), temperature_K=cfg.get('temperature_K'),
+            activation_count=crosslinking.get('activation_count'),
+            activation_fraction=crosslinking.get('activation_fraction'),
             base_seed=cfg.get('seed'), replicates_requested=cfg['replicates'],
             replicates_completed=completed,
             project_state='completed' if completed == cfg['replicates'] else 'partial' if available else 'pending',
             smoke=bool(cfg.get('smoke')), target_total_atoms=build.get('total_atoms'),
-            target_conversion=build.get('target_conversion'), cooling_rate_K_ns=cfg.get('cooling_rate_K_ns'),
+            target_conversion=crosslinking.get('target_conversion'), cooling_rate_K_ns=cfg.get('cooling_rate_K_ns'),
             pressure_atm=cfg.get('pressure_atm'), input_sha256=cfg.get('input_sha256'),
             configuration_sha256=configuration_fingerprint(cfg))
         metadata = {k:_finite(v) for k,v in metadata.items()}

@@ -1,4 +1,9 @@
-"""Detached local GPU queue: one replica per selected GPU, explicit seeds and logs."""
+"""Detached local GPU queue: one replica per selected GPU, explicit seeds and logs.
+
+Submitting a monomer project also queues its crosslink projects; crosslink
+replica N starts when monomer replica N has completed. --mechanical queues
+the optional elastic constants of finished crosslink/network replicas.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -53,15 +58,16 @@ def visible_gpus(selection=None):
 
 
 def replica_complete(project, cfg, replica):
+    """Every default stage of the replica has finished (the optional mechanical stage is not one)."""
+    mode = cfg.get('input_mode', 'saved_network')
+    if mode == 'monomer':
+        from workflows.network_properties.monomer import replica_complete as monomer_complete
+        return monomer_complete(project, cfg, replica)
     base = Path(project) / f'replica_{replica:02d}'
     required = [base / 'dry_result.json']
-    if cfg.get('input_mode') == 'epoxy':
-        required += [base / 'crosslinking/done.json',
-                     base / 'crosslinking/results/epoxy/final.structure.json']
-    if cfg['mechanical']:
-        from workflows.network_properties.mechanical import result_current
-        if not result_current(base):
-            return False
+    if mode == 'crosslink':
+        from workflows.network_properties.construction import network_path
+        required += [base / 'crosslinking/done.json', network_path(project, cfg, replica)]
     required += [base / 'solvents' / s['name'] / 'result.json' for s in cfg['solvents']]
     return all(path.is_file() for path in required)
 
@@ -103,7 +109,7 @@ def record_failure(job, code):
 def mark_interrupted(project, job):
     """A worker killed by a signal cannot close its own progress record."""
     from workflows.network_properties.execution import read_progress, finish_progress
-    base = Path(project) / f'replica_{job["replica"]:02d}'
+    base = Path(job.get('project', project)) / f'replica_{job["replica"]:02d}'
     try:
         with file_lock(base / '.run.lock', blocking=False):
             pass
@@ -130,18 +136,53 @@ def worker_command(project, replica):
     return [sys.executable, '-u', str(SCRIPT), 'run', str(project), '--replica', str(replica), '--defer-report']
 
 
-def plan(project, cfg, devices):
+def mechanical_command(project, replica):
+    return [sys.executable, '-u', str(SCRIPT), 'mechanical', str(project), '--replica', str(replica), '--defer-report']
+
+
+def submission_projects(project, cfg, monomer_only=False):
+    """The project and, for a monomer project, its crosslink projects: [(directory, cfg)]."""
+    from workflows.network_properties.network_properties import children
+    projects = [(Path(project), cfg)]
+    if cfg.get('input_mode') == 'monomer' and not monomer_only:
+        projects += [(child, json.loads((child / 'project.json').read_text())) for child in children(project)]
+    return projects
+
+
+def plan(project, cfg, devices, mechanical=False, monomer_only=False):
     from workflows.network_properties.network_properties import input_digest
     from workflows.network_properties.execution import replica_seed
+    from workflows.network_properties.mechanical import result_current
+    project = Path(project)
+    jobs, configurations = [], {}
+    if monomer_only and (mechanical or cfg.get('input_mode') != 'monomer'):
+        raise ValueError('--monomer-only submits the replicas of a monomer project (without --mechanical)')
+    for directory, settings in submission_projects(project, cfg, monomer_only):
+        configurations[str(directory)] = configuration_fingerprint(settings)
+        mode = settings.get('input_mode', 'saved_network')
+        if mechanical and mode == 'monomer':
+            continue
+        name = '.' if directory == project else directory.relative_to(project).as_posix()
+        for i in range(1, settings['replicates'] + 1):
+            base = directory / f'replica_{i:02d}'
+            job = dict(project=str(directory), name=name, replica=i, seed=replica_seed(directory, settings, i),
+                       kind='mechanical' if mechanical else 'run',
+                       log=str(directory / 'jobs' / f'replica_{i:02d}{".mechanical" if mechanical else ""}.log'))
+            if mechanical:
+                ready = (base / 'relaxed_300K.structure.json').is_file()
+                job['state'] = 'completed' if ready and result_current(base) else 'queued' if ready else 'skipped'
+                if not ready:
+                    job['error'] = 'no relaxed 300 K structure yet; run the project first'
+            else:
+                job['state'] = 'completed' if replica_complete(directory, settings, i) else 'queued'
+                if mode == 'crosslink':
+                    from workflows.network_properties.construction import parent_project
+                    job['after'] = dict(project=str(parent_project(directory, settings)), replica=i)
+            jobs.append(job)
     submission = dict(project=str(project), created_at=now(),
-        configuration_sha256=configuration_fingerprint(cfg),
-        input_sha256=input_digest(project, cfg),
-        gpus=devices, max_parallel=min(len(devices), cfg['replicates']),
-        jobs=[dict(replica=i, seed=replica_seed(project, cfg, i),
-            state='completed' if replica_complete(project, cfg, i) else 'queued',
-            log=str(Path(project) / 'jobs' / f'replica_{i:02d}.log'))
-            for i in range(1, cfg['replicates'] + 1)])
-    submission['max_parallel'] = min(len(devices), sum(j['state'] == 'queued' for j in submission['jobs']))
+        configuration_sha256=configuration_fingerprint(cfg), configurations=configurations,
+        input_sha256=input_digest(project, cfg), gpus=devices, jobs=jobs)
+    submission['max_parallel'] = min(len(devices), sum(j['state'] == 'queued' for j in jobs))
     return submission
 
 
@@ -154,7 +195,9 @@ def submit(args):
         raise ValueError('GPU submission requires platform CUDA in project.json; CPU projects use run')
     if input_digest(project, cfg) != cfg['input_sha256']:
         raise ValueError('input structure was changed')
-    submission = plan(project, cfg, visible_gpus(args.gpus))
+    monomer_only = getattr(args, 'monomer_only', False)
+    submission = plan(project, cfg, visible_gpus(args.gpus), mechanical=getattr(args, 'mechanical', False),
+                      monomer_only=monomer_only)
     if args.dry_run:
         print(json.dumps(submission, indent=2))
         return submission
@@ -167,12 +210,13 @@ def submit(args):
         except BlockingIOError as exc:
             raise RuntimeError(f'GPU jobs are already running for {project}; use status') from exc
         # Workers stop when the launcher dies, but not instantly; never share a GPU with one.
-        live = live_replicas(project, cfg)
-        if live:
-            raise RuntimeError(f'Replicas {live} of {project} are still running outside this launcher; '
-                               'wait for them to stop or stop them, then submit again')
-        initialize_project(project)
-        if all(job['state'] == 'completed' for job in submission['jobs']):
+        for directory, settings in submission_projects(project, cfg, monomer_only):
+            live = live_replicas(directory, settings)
+            if live:
+                raise RuntimeError(f'Replicas {live} of {directory} are still running outside this launcher; '
+                                   'wait for them to stop or stop them, then submit again')
+            initialize_project(directory)
+        if all(job['state'] in ('completed', 'skipped') for job in submission['jobs']):
             report(project)
             print('All replicas already completed; report refreshed.')
             return submission
@@ -186,7 +230,7 @@ def submit(args):
                 stdout=log, stderr=subprocess.STDOUT, start_new_session=True,
                 pass_fds=(handle.fileno(),), cwd=ROOT)
         write_json(jobs / 'launcher.json', dict(pid=process.pid, submitted_at=now(), submission=str(path)))
-        print(f'Submitted {sum(j["state"] == "queued" for j in submission["jobs"])} replicas; '
+        print(f'Submitted {sum(j["state"] == "queued" for j in submission["jobs"])} replica jobs; '
               f'GPUs={",".join(d["index"] for d in submission["gpus"])}; launcher PID={process.pid}')
         print(f'Logs: {jobs}; status: {sys.executable} {SCRIPT} status {project}')
         return submission
@@ -196,17 +240,37 @@ def submit(args):
         handle.close()
 
 
-def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_report=True):
+def _dependency(job, jobs):
+    """'ready', 'wait' or the reason the job cannot run (its monomer replica did not complete)."""
+    after = job.get('after')
+    if not after:
+        return 'ready'
+    parent = Path(after['project'])
+    dependency = next((j for j in jobs if Path(j['project']) == parent and j['replica'] == after['replica']
+                       and j.get('kind', 'run') == 'run'), None)
+    label = f'monomer {parent.name}/replica_{after["replica"]:02d}'
+    if dependency is not None and dependency['state'] in ('queued', 'running'):
+        return 'wait'
+    if dependency is not None and dependency['state'] != 'completed':
+        return f'{label} {dependency["state"]}'
+    cfg = json.loads((parent / 'project.json').read_text())
+    return 'ready' if replica_complete(parent, cfg, after['replica']) else f'{label} has not finished; submit the monomer project'
+
+
+def dispatch(path, *, command_factory=worker_command, mechanical_factory=mechanical_command,
+             poll_interval=.5, refresh_report=True):
     """Run the queue and persist status; command injection is used only by CPU tests."""
     from workflows.network_properties.network_properties import write_json, report
     submission = json.loads(Path(path).read_text())
     project = Path(submission['project'])
-    cfg = json.loads((project / 'project.json').read_text())
-    if configuration_fingerprint(cfg) != submission['configuration_sha256']:
-        write_json(project / 'jobs/status.json', dict(submission, state='failed',
-            error='configuration changed after submission', finished_at=now()))
-        raise ValueError('configuration changed after submission')
     status_path = project / 'jobs/status.json'
+    configurations = submission.get('configurations') or {str(project): submission['configuration_sha256']}
+    for directory, fingerprint in configurations.items():
+        cfg = json.loads((Path(directory) / 'project.json').read_text())
+        if configuration_fingerprint(cfg) != fingerprint:
+            write_json(status_path, dict(submission, state='failed',
+                error=f'configuration changed after submission: {directory}', finished_at=now()))
+            raise ValueError(f'configuration changed after submission: {directory}')
     state = dict(submission, pid=os.getpid(), state='running', started_at=now())
     pending = [job for job in state['jobs'] if job['state'] == 'queued']
     active, stopped = {}, False
@@ -226,11 +290,19 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
         while pending or active:
             if stopped:
                 break
+            for job in list(pending):
+                verdict = _dependency(job, state['jobs'])
+                if verdict not in ('ready', 'wait'):
+                    job.update(state='blocked', error=verdict, finished_at=now())
+                    pending.remove(job)
+                    save()
             for device in state['gpus']:
                 key = device['uuid']
-                if key in active or not pending:
+                ready = [job for job in pending if _dependency(job, state['jobs']) == 'ready']
+                if key in active or not ready:
                     continue
-                job = pending.pop(0)
+                job = ready[0]
+                pending.remove(job)
                 environment = dict(os.environ, CUDA_VISIBLE_DEVICES=key, CUDA_DEVICE_ORDER='PCI_BUS_ID')
                 for variable in ('OPENMM_CPU_THREADS', 'OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS'):
                     environment.setdefault(variable, '1')
@@ -239,9 +311,11 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
                 try:
                     job['log_offset'] = log.stat().st_size if log.exists() else 0
                     with log.open('ab') as output:
-                        output.write(f'\n[{now()}] replica={job["replica"]} seed={job["seed"]} GPU={device["index"]}\n'.encode())
+                        output.write(f'\n[{now()}] {job.get("kind", "run")} replica={job["replica"]} seed={job["seed"]} '
+                                     f'GPU={device["index"]}\n'.encode())
                         output.flush()
-                        child = subprocess.Popen(command_factory(project, job['replica']),
+                        factory = mechanical_factory if job.get('kind') == 'mechanical' else command_factory
+                        child = subprocess.Popen(factory(Path(job.get('project', project)), job['replica']),
                             env=environment, cwd=ROOT, stdin=subprocess.DEVNULL,
                             stdout=output, stderr=subprocess.STDOUT, start_new_session=True,
                             # A killed launcher must not leave a worker on a GPU it no longer tracks.
@@ -265,7 +339,7 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
                             job['error'] = f'exit code {code}; could not write error log: {exc}'
                     del active[key]
                     save()
-            if active:
+            if active or pending:
                 time.sleep(poll_interval)
         if stopped:
             for child, job in active.values():
@@ -281,12 +355,17 @@ def dispatch(path, *, command_factory=worker_command, poll_interval=.5, refresh_
             for job in pending:
                 job.update(state='cancelled')
         terminal_state = 'cancelled' if stopped else (
-            'failed' if any(j['state'] == 'failed' for j in state['jobs']) else 'completed')
+            'failed' if any(j['state'] in ('failed', 'blocked') for j in state['jobs']) else 'completed')
         state['state'] = 'collecting' if refresh_report else terminal_state
         save()
         if refresh_report:
             try:
-                report(project)
+                # Crosslink reports also refresh the monomer report and its series.
+                children = [Path(d) for d in configurations if Path(d) != project]
+                for directory in children:
+                    report(directory)
+                if not children:
+                    report(project)
             except Exception as exc:
                 state.update(state='failed', report_error=str(exc))
                 save()
@@ -395,51 +474,78 @@ def reseed(args):
     return plan
 
 
-def status(args):
-    project = args.project.resolve()
-    path = project / 'jobs/status.json'
-    if not path.is_file():
-        path = project / 'jobs/plan.json'
-    if not path.is_file():
-        raise FileNotFoundError(f'No GPU submission found: {project}')
-    state = json.loads(path.read_text())
+def _print_replica(directory, replica, job=None):
     from workflows.network_properties.execution import read_progress
-    print(f'Project: {project}\nState: {state.get("state", "starting")}')
-    if state.get('state') in ('starting', 'running', 'collecting'):
-        launcher = process_state(state.get('pid'))
-        if launcher in (None, 'Z'):
-            print(f'WARNING: launcher PID {state.get("pid")} is '
-                  f'{"a zombie" if launcher == "Z" else "not running"}; job states below are not '
-                  'being updated. Its workers stop with it; submit again to resume unfinished replicas '
-                  '(submit refuses while one is still running).')
-    for job in state['jobs']:
-        name = f'replica_{job["replica"]:02d}'
-        print(f'{name}: {job["state"]:10s} seed={job["seed"]} GPU={job.get("gpu_index", "—")} log={job["log"]}')
+    name = f'replica_{replica:02d}'
+    progress = read_progress(Path(directory) / name)
+    if job is not None:
+        kind = '' if job.get('kind', 'run') == 'run' else f' [{job["kind"]}]'
+        print(f'  {name}{kind}: {job["state"]:10s} seed={job["seed"]} GPU={job.get("gpu_index", "—")} log={job["log"]}')
         if job['state'] == 'running':
             alive = process_state(job.get('pid'))
             if alive is None:
-                print(f'  WARNING: worker PID {job.get("pid")} no longer exists (lost)')
+                print(f'    WARNING: worker PID {job.get("pid")} no longer exists (lost)')
             elif alive == 'Z':
-                print(f'  WARNING: worker PID {job.get("pid")} exited but was not reaped (zombie)')
-        progress = read_progress(project / name)
-        if progress:
-            stage = progress.get('stage', '—')
-            since = progress.get('finished_at') if progress.get('state') != 'running' else None
-            print(f'  stage: {stage} [{progress.get("state")}] since {progress.get("started_at")} '
-                  f'({elapsed(progress.get("started_at"), since)})')
-            if progress.get('error'):
-                print(f'  error: {progress["error"]}\n  error log: {progress.get("error_log")}')
-        text = log_section(job['log'], job.get('log_offset', 0), limit=200_000)
-        cycles = CYCLE_PATTERN.findall(text)
-        crosslinking = (progress or {}).get('stage', '').startswith('crosslinking')
-        if cycles and crosslinking and job['state'] == 'running':
-            cycle, conversion = cycles[-1]
-            print(f'  crosslinking: cycle {cycle}, conversion {conversion}')
-        last = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), None)
-        if last and job['state'] == 'running':
-            print(f'  last log: {last[:200]}')
-        if job.get('error'):
-            print(f'  cause: {job["error"]}\n  job error log: {job.get("error_log")}')
+                print(f'    WARNING: worker PID {job.get("pid")} exited but was not reaped (zombie)')
+    else:
+        print(f'  {name}: {(progress or {}).get("state", "not started")}')
+    if progress:
+        stage = progress.get('stage', '—')
+        since = progress.get('finished_at') if progress.get('state') != 'running' else None
+        print(f'    stage: {stage} [{progress.get("state")}] since {progress.get("started_at")} '
+              f'({elapsed(progress.get("started_at"), since)})')
+        if progress.get('error'):
+            print(f'    error: {progress["error"]}\n    error log: {progress.get("error_log")}')
+    if job is None:
+        return
+    text = log_section(job['log'], job.get('log_offset', 0), limit=200_000)
+    cycles = CYCLE_PATTERN.findall(text)
+    crosslinking = (progress or {}).get('stage', '').startswith('crosslinking')
+    if cycles and crosslinking and job['state'] == 'running':
+        cycle, conversion = cycles[-1]
+        print(f'    crosslinking: cycle {cycle}, conversion {conversion}')
+    last = next((line.strip() for line in reversed(text.splitlines()) if line.strip()), None)
+    if last and job['state'] == 'running':
+        print(f'    last log: {last[:200]}')
+    if job.get('error'):
+        print(f'    cause: {job["error"]}')
+        if job.get('error_log'):
+            print(f'    job error log: {job["error_log"]}')
+
+
+def status(args):
+    """Replica stages of the project (a monomer project: with its crosslinks) and the latest GPU submission."""
+    project = args.project.resolve()
+    cfg = json.loads((project / 'project.json').read_text())
+    path = project / 'jobs/status.json'
+    if not path.is_file():
+        path = project / 'jobs/plan.json'
+    state = json.loads(path.read_text()) if path.is_file() else None
+    print(f'Project: {project}')
+    if state is None:
+        print('GPU submission: none')
+    else:
+        print(f'GPU submission: {state.get("state", "starting")}')
+        if state.get('state') in ('starting', 'running', 'collecting'):
+            launcher = process_state(state.get('pid'))
+            if launcher in (None, 'Z'):
+                print(f'WARNING: launcher PID {state.get("pid")} is '
+                      f'{"a zombie" if launcher == "Z" else "not running"}; job states below are not '
+                      'being updated. Its workers stop with it; submit again to resume unfinished replicas '
+                      '(submit refuses while one is still running).')
+    jobs = (state or {}).get('jobs', [])
+    for directory, settings in submission_projects(project, cfg):
+        mode = settings.get('input_mode', 'saved_network')
+        title = directory.name if directory == project else directory.relative_to(project).as_posix()
+        done = sum(replica_complete(directory, settings, i) for i in range(1, settings['replicates'] + 1))
+        print(f'{title} [{mode}]: {done}/{settings["replicates"]} replicas complete')
+        for replica in range(1, settings['replicates'] + 1):
+            own = [j for j in jobs if Path(j.get('project', project)) == directory and j['replica'] == replica]
+            if own:
+                for job in own:
+                    _print_replica(directory, replica, job)
+            else:
+                _print_replica(directory, replica)
     return state
 
 

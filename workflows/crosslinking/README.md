@@ -59,21 +59,34 @@ packing直後のvoidを潰すため、初期NPTの前に363.15 K・200 MPa・50 
 ### 反応前の平衡状態（`pre_reaction/`）
 
 初期NPTの後、反応を始める前に同じ温度・1 atmのNPTを100 ps続け（`--pre-reaction-sampling-steps 100000`、
-0で省略）、1 psごと（`--pre-reaction-frame-steps 1000`）に未反応のエポキシ環を集計します。
-座標・速度・boxはそのまま成長cycleへ引き継ぎます。
+0で省略）、1 psごと（`--pre-reaction-frame-steps 1000`）に未反応の環（エポキシ、オキセタンなど、
+反応ルールのconversion reactantの残りサイト）を集計します。座標・速度・boxはそのまま成長cycleへ引き継ぎます。
+同じ集計（`pre_reaction.py`）を、network_propertiesの単分子プロジェクトがTのNPT観測に使います
+（そちらは開始点ルールの`target_smarts`で環を探します）。
 
-- エポキシ数密度: 未反応環の数／セル体積（nm⁻³）。開始点として開いた環は含みません。
-- 配位数: 1つの環あたりの接触相手の平均数。接触は「一方の環のO」と「他方の環の攻撃されるCH2炭素」の距離が
-  カットオフ以内（最小イメージ、同一分子内も含む）。リレー反応1段の幾何（開いた環のOに残ったOHが次の環のCH2を攻撃）
+- 数密度: 未反応環の数／セル体積（nm⁻³とmmol/cm³）。開始点として開いた環は含みません。
+- 配位数: 1つの環あたりの接触相手の平均数。接触は「一方の環のO」と「他方の環の攻撃されるCH2炭素」
+  （環のOに結合しH2を持つ環炭素）の距離がカットオフ以内（最小イメージ、同一分子内も含む）。
+  リレー反応1段の幾何（開いた環のOに残ったOHが次の環のCH2を攻撃。オキセタンでは次の環のOがオキソニウムのα-CH2を攻撃）
   に対応します。カットオフは反応の開始距離と上限（既定4 Åと6 Å、`--fixed-reaction-cutoff`なら開始距離のみ）。
 - 最大クラスター分率: 接触グラフの最大連結成分に含まれる環の数／全環数。
 - MSD: 環の重原子重心。フレーム間の最小イメージで展開し、系全体の重心ドリフトを除き、全時間原点で平均。
   拡散係数はラグ10〜50%の範囲でMSD/6tから求め、log-log傾き`msd_exponent_alpha`も記録します
   （1から大きく外れる場合はまだ拡散領域ではありません）。
 
-体積・数密度・配位数・最大クラスター分率は全フレームの平均と標準偏差を`pre_reaction/epoxide_equilibrium.json`に、
-フレームごとの値を`epoxide_frames.csv`に、MSDを`epoxide_msd.csv`に保存し、要約を`metrics.json`の
-`pre_reaction_epoxides`にも入れます。
+環の大きさから名前（三員環はepoxide、四員環はoxetane）を付けます。体積・数密度・配位数・最大クラスター分率は
+全フレームの平均と標準偏差を`pre_reaction/reactive_rings.json`に、フレームごとの値を`reactive_ring_frames.csv`に、
+MSDを`reactive_ring_msd.csv`に保存し、要約を`metrics.json`の`pre_reaction_rings`にも入れます。
+
+### 保存済み構造から始める（`--start-structure`）
+
+`--start-structure relaxed.structure.json`を渡すと、packing・加圧NPT・300 K基準NPT・初期NPT・反応前samplingを省き、
+その構造（未反応モノマーの緩和構造など）の分子に開始点を作ります。開始点の付加とoptの後、
+NVT（`--nvt-timestep` × `--nvt-steps`、既定0.1 fs × 10000）→ NPT（`--equilibration-timestep` × `--equilibration-steps`、1 atm）
+で緩和してから成長cycleへ進みます。`--smiles`・`--total-atoms`・`--density`などのpacking条件は使いません。
+開始点で足す原子の分だけ総原子数は増えます。入力構造のパスとSHA-256、分子種のSMILESを`settings.json`に記録します。
+network_propertiesの架橋プロジェクトは、単分子プロジェクトのTの緩和構造からこの方法で架橋します。
+
 目標反応率は既定で99.5%（`--target-conversion 0.995`）、最大サイクル数は5000です。
 目標に到達すれば早期終了し、未到達でも最大5000サイクルで最終構造を保存して終了します。
 変更する場合は`--target-conversion`と`--cycles`を明示してください。

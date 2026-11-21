@@ -117,8 +117,11 @@ packing, and fixed-loading NVT/NPT simulation with checkpoint resume.
   network's saved charges, specify `Solvent("SMILES")`, pack a molecule count,
   and relax/sample the wet network.
 - [Crosslinked network properties](workflows/network_properties/README.md):
-  independent epoxy construction per replica, 800→100 K relaxation and Tg/CTE,
-  300 K thermodynamics, void fraction and elastic response,
+  a monomer project (packing and relaxation at the reaction temperature T,
+  800→100 K Tg/CTE, 300 K and T properties including reactive-ring density,
+  contacts and MSD), then one crosslink project per start-site density whose
+  replica N crosslinks from monomer replica N; Tg/CTE, 300 K thermodynamics and
+  void fraction by default, elastic response on demand,
   followed by arbitrary neutral-solvent insertion free energies
   and self diffusion, with sampling diagnostics, per-replica CSV summaries, and
   local GPU job submission with explicit GPU indices and independent seeds.

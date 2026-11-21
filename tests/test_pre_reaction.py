@@ -12,7 +12,7 @@ pre = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(pre)
 
 
-class PreReactionEpoxides(unittest.TestCase):
+class ReactiveRings(unittest.TestCase):
     def test_groups_pick_ring_oxygen_and_the_ch2_carbon(self):
         # Epoxide C1(H2)-O2-C3(H): only C1 carries two H and is the attacked carbon.
         atoms = {'c1': 6, 'o2': 8, 'c3': 6, 'h1': 1, 'h2': 1, 'h3': 1, 'x': 6}
@@ -22,7 +22,7 @@ class PreReactionEpoxides(unittest.TestCase):
             neighbors[a].add(b); neighbors[b].add(a)
         graph = SimpleNamespace(atoms={sid: dict(atomic_number=z) for sid, z in atoms.items()}, neighbors=neighbors)
         order = ('x', 'c1', 'o2', 'c3', 'h1', 'h2', 'h3')
-        self.assertEqual(pre.epoxide_groups(graph, {('c1', 'c3', 'o2')}, order),
+        self.assertEqual(pre.site_groups(graph, {('c1', 'c3', 'o2')}, order),
                          [dict(oxygen=2, carbons=[1], heavy=[1, 3, 2])])
 
     def test_contacts_use_the_minimum_image_and_both_directions(self):
@@ -42,7 +42,7 @@ class PreReactionEpoxides(unittest.TestCase):
         groups = [dict(oxygen=0, carbons=[1], heavy=[0, 1])]
         # The ring moves +1 A in x per ps and crosses x = 10; a very heavy third atom pins the
         # centre of mass, so the drift correction is negligible.
-        sampler = pre.EpoxideSampler(groups, [1., 1., 1e9], [4.])
+        sampler = pre.RingSampler(groups, [1., 1., 1e9], [4.])
         for frame in range(6):
             x = (8.5 + frame) % 10.
             sampler.add(np.array([[x, 1, 1], [(x + 1) % 10, 1, 1], [5., 5, 5]]), box, float(frame))
@@ -50,7 +50,7 @@ class PreReactionEpoxides(unittest.TestCase):
         np.testing.assert_allclose(lag, [1, 2, 3, 4, 5])
         np.testing.assert_allclose(msd, np.arange(1, 6) ** 2, rtol=1e-6)
         # The whole cell translating together is centre-of-mass drift, not diffusion.
-        drifting = pre.EpoxideSampler(groups, [1., 1., 1.], [4.])
+        drifting = pre.RingSampler(groups, [1., 1., 1.], [4.])
         for frame in range(4):
             drifting.add(np.array([[1. + frame, 1, 1], [2. + frame, 1, 1], [5. + frame, 5, 5]]), box, float(frame))
         self.assertAlmostEqual(pre.mean_squared_displacement(np.array(drifting.centroids), drifting.times)[1].max(), 0.)
@@ -59,10 +59,38 @@ class PreReactionEpoxides(unittest.TestCase):
         self.assertAlmostEqual(fit['msd_exponent_alpha'], 1.)
         with tempfile.TemporaryDirectory() as temp:
             result = sampler.summary(temp, temperature_K=363.15, pressure_atm=1., sampling_ps=5.)
-            self.assertEqual((result['frames'], result['epoxides']), (6, 1))
-            self.assertAlmostEqual(result['epoxide_number_density_nm3']['mean'], 1.)
+            self.assertEqual((result['frames'], result['rings'], result['ring']), (6, 1, '2-membered ring'))
+            self.assertAlmostEqual(result['ring_number_density_nm3']['mean'], 1.)
+            self.assertAlmostEqual(result['ring_number_density_mmol_cm3']['mean'], 1 / .60221408)
             self.assertAlmostEqual(result['msd_final_A2'], 25., places=4)
-            self.assertTrue((Path(temp) / 'epoxide_frames.csv').is_file())
+            self.assertTrue((Path(temp) / 'reactive_ring_frames.csv').is_file())
+
+    @unittest.skipUnless(importlib.util.find_spec('rdkit') and importlib.util.find_spec('polypaves'),
+                         'needs RDKit and polypaves')
+    def test_smarts_groups_count_each_ring_once_for_epoxide_and_oxetane(self):
+        from rdkit import Chem
+
+        def graph(smiles):
+            molecule = Chem.AddHs(Chem.MolFromSmiles(smiles))
+            Chem.Kekulize(molecule, clearAromaticFlags=True)
+            return dict(atoms=[dict(atomic_number=a.GetAtomicNum(), formal_charge=a.GetFormalCharge(),
+                                    aromatic=False) for a in molecule.GetAtoms()],
+                        bonds=[[b.GetBeginAtomIdx(), b.GetEndAtomIdx(), int(b.GetBondTypeAsDouble())]
+                               for b in molecule.GetBonds()])
+
+        epoxy = graph('CCC(COCC1CO1)(COCC2CO2)COCC3CO3')
+        groups = pre.smarts_groups([epoxy, epoxy], '[C;H2:1]1[O;+0;X2:2][C:3]1')
+        self.assertEqual(len(groups), 6)
+        # The second molecule's rings are offset by the first molecule's atom count.
+        self.assertEqual(groups[3]['oxygen'] - groups[0]['oxygen'], len(epoxy['atoms']))
+        self.assertTrue(all(len(g['heavy']) == 3 and len(g['carbons']) == 1 for g in groups))
+        oxetane = graph('CCC1(COCC2(CC)COC2)COC1')
+        groups = pre.smarts_groups([oxetane], '[C;H2:1]1[O;+0;X2:2][C:3][C:6]1')
+        # Two rings, each matched twice by the SMARTS (either ring CH2 as atom 1), counted once;
+        # both ring CH2 next to the oxygen are attackable.
+        self.assertEqual(len(groups), 2)
+        self.assertTrue(all(len(g['heavy']) == 4 and len(g['carbons']) == 2 for g in groups))
+        self.assertEqual(pre.ring_name(4), 'oxetane')
 
 
 chains_spec = importlib.util.spec_from_file_location('chains', ROOT / 'workflows/crosslinking/chains.py')

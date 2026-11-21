@@ -1,11 +1,18 @@
-# 架橋ネットワークの熱・力学・溶媒物性評価
+# 単分子から架橋膜までの物性評価
 
-既定では、各レプリカがモノマーのpack・開始点作成・架橋反応から独立に実行し、
-自分で生成した構造を熱緩和・乾燥物性・溶媒評価へ渡します。
+2つのコマンドに分けて計算します。
+
+1. **単分子プロジェクト**（`monomer`）: モノマーをpackし、温度T（既定363.15 K = 90 ℃、`--temperature`）で緩和します。
+   続けて熱履歴（800→100 K）でTg、300 Kの物性、最後にTの物性（環の数密度・配位数・MSDなどを含む）を求めます。
+   Tの最後のNPT構造`replica_XX/<T>K/relaxed_<T>K.structure.json`が、架橋計算の出発構造です。機械特性は計算しません。
+2. **架橋プロジェクト**（`crosslink`）: 単分子プロジェクトのディレクトリと開始点の密度を指定します。
+   密度ごとに`<単分子>/crosslinks/<名前>/`を作り、架橋レプリカNは**単分子レプリカNのT緩和構造**に開始点を作って、
+   同じ温度Tで架橋します。その後、熱履歴（Tg）と300 Kの物性を既定で求めます。
+   機械特性（弾性）は時間がかかるため、膜ができた後に`mechanical`コマンドで任意に実行します。
+
+保存済みの乾燥ネットワークを評価する場合は`network`コマンドを使います（Tg・300 K・溶媒）。
 架橋後の結合、部分電荷、安定原子IDを保持し、その後は固定トポロジーのSage/OpenMMで計算します。
-`--network final.structure.json`を明示すると、保存済みの共通ネットワークから評価できます。
 既存のPCFF鎖構築用`thermomechanical.py`とは別の入力経路です。
-周期境界をまたぐ架橋を有限分子MOL2として再importしません。
 
 計算する物性の一覧と、それぞれの意味・求め方は[PROPERTIES.md](PROPERTIES.md)にまとめています。
 
@@ -17,115 +24,141 @@
 
 ```bash
 conda activate paves-reactive
-python workflows/network_properties/network_properties.py new \
-  workflows/network_properties/output/epoxy \
-  --replicates 4 --seed 31415 --max-reactions-per-cycle 50 \
-  --solvent water=O --solvent methanol=CO --solvent 'acetone=CC(=O)C' \
-  --solvent-molecules 10 --platform CUDA
+NP=workflows/network_properties/network_properties.py
 
-# 必要に応じて、作成されたproject.jsonで計算時間やseedを変更する。
-python workflows/network_properties/network_properties.py run \
-  workflows/network_properties/output/epoxy
-python workflows/network_properties/network_properties.py report \
-  workflows/network_properties/output/epoxy
+# 1. 単分子：4レプリカ（独立なpacking）、90 ℃
+python $NP monomer workflows/network_properties/output/TMPTGE --replicates 4 --seed 31415 --platform CUDA
+python $NP submit workflows/network_properties/output/TMPTGE --monomer-only   # 単分子だけ（または run）
+python $NP status workflows/network_properties/output/TMPTGE                   # 全レプリカの完了を確認
+
+# 2. 架橋密度を並べて指定すると、密度ごとに子プロジェクトを作る（単分子の計算前に作ってもよい）
+python $NP crosslink workflows/network_properties/output/TMPTGE \
+  --activation-fraction 0.02 0.05 0.1 --max-reactions-per-cycle 50 --solvent water=O
+python $NP submit workflows/network_properties/output/TMPTGE          # 単分子と全架橋をまとめて投入
+
+# 3. 任意：機械特性（架橋膜の300 K構造から）
+python $NP mechanical workflows/network_properties/output/TMPTGE/crosslinks/af0.05
+python $NP submit workflows/network_properties/output/TMPTGE --mechanical   # GPUへまとめて投入
+
+python $NP status workflows/network_properties/output/TMPTGE   # 単分子と各架橋の進捗をツリー表示
+python $NP report workflows/network_properties/output/TMPTGE   # レポートと架橋シリーズを書き直す（MDなし）
 ```
 
-溶媒を省略すれば乾燥物性だけを実行します。溶媒は複数指定可能です。
-Sageが割り当て可能な単一の中性分子が対象で、イオン、ラジカル、混合SMILESは
-既存の溶媒APIで拒否されます。水もSageのモデルです。
-溶媒数は各溶媒で共通の既定値を使います。異なる濃度の比較は別projectで作成します。
-SMILESが同じでも温度、溶媒数、樹脂の架橋率が違えば、別の条件の物性です。
+ディレクトリ構成:
 
-`--skip-mechanical`で追加MDの多い弾性評価を無効にできます。
-熱伝導率（RNEMD）は架橋ネットワークでMDが発散したため、このワークフローから外しました。
-作成済みのproject.jsonにもすべての設定を記録します。
-架橋構築の既定は総原子数20000を超える最小分子数、目標反応率99.5%、最大5000 cycle、
-トラジェクトリ保存OFFです。モノマーはTMP triglycidyl etherです。
-`--remove-sol-fraction`で、現像を模して周期次元3（周期ベクトルの階数3、3次元に無限につながった）網目だけを残し、
+```text
+TMPTGE/                               単分子プロジェクト
+  project.json  definitions/          開始点・反応ルール（activation.yaml / reactions.yaml）
+  replica_01/
+    build/                            pack → 200 MPa加圧 → T・1 atmで1 ns緩和（開始点なし、反応なし）
+    00_minimize … 06_production_300K/ 熱履歴（800→100→300 K）と300 K NPT
+    07_nvt_300K/
+    363.15K/                          300 K → T → 1 ns緩和 → 2 ns NPT（物性・環の統計）→ 2 ns NVT
+      relaxed_363.15K.structure.json  ★架橋の出発構造
+      03_production/reactive_rings/   環の数密度・配位数・クラスター・MSD
+  report.md  property_summary.csv
+  crosslink_series.csv / .png         架橋密度ごとの比較（Tg、反応率、密度、残膜率、網目密度…）
+  crosslinks/
+    af0.05/                           架橋プロジェクト（開始点の割合0.05）
+      project.json  definitions/
+      replica_01/                     ← 単分子replica_01の★から開始
+        crosslinking/results/network/ 開始点作成 → opt → NVT → NPT → 反応cycle → 最終緩和
+        network_origin.json           出発構造（単分子レプリカ・ハッシュ）、反応率、開始点密度
+        00_minimize … 07_nvt_300K/    熱履歴（Tg）と300 K物性
+        mechanical/                   任意（mechanicalコマンド）
+      report.md
+    n8/                               --activation-count 8 の場合
+```
+
+### 単分子プロジェクト（`monomer`）
+
+| 段階 | 既定 |
+|---|---|
+| 構築 | packing（0.5 g/cm³、`--packing-density`）→ T・200 MPa・50 psの加圧NPT（`--compression-pressure-mpa`、`--compression-steps`）→ T・1 atm・1 ns（`--equilibration-steps`） |
+| 熱履歴 | 300→800 K加熱、800 K 1 ns、800→100 K冷却（40 K/ns）でTg、100→300 K |
+| 300 K | NPT 10 ns（密度・Cp・CTE・圧縮率…、環の数密度）、NVT 10 ns（直接Cv・誘電） |
+| T | 300 K NPTの続きからTへ20 K以下の刻みで昇温（各100 ps）→ 1 ns緩和 → NPT 2 ns → NVT 1 ns緩和 + 2 ns |
+
+Tの物性は`replica_XX/<T>K/result.json`と`report.md`の「<T> K monomer liquid」に出ます。
+環（エポキシ・オキセタンなど、開始点ルールの`target_smarts`に一致する未反応環）について、
+300 KとTの**単位体積あたりの環の数**（nm⁻³とmmol/cm³。環の数 ÷ その温度のNPT平均体積）を
+それぞれ「300 K thermodynamics」と「<T> K」の表に加えます。
+TのNPT観測（1 psごと）からは、環の配位数・接触グラフの最大クラスター分率（4 Åと6 Å、`ring_contact_cutoffs_A`）、
+環の重原子重心のMSD・拡散係数・MSD指数αも求めます（定義は[crosslinking/README.md](../crosslinking/README.md)）。
+拡散係数は、MSD指数αが0.8〜1.2（拡散域）の場合だけチェック通過として集計します。
+`project.json`の`t_equilibration_ps`、`t_production_ps`、`t_nvt_production_ps`で時間を変えられます。
+
+既定のモノマーはTMP triglycidyl ether（`--smiles`で変更）です。`--chemistry oxetane`で
+オキセタン用のYAML（[crosslinking/oxetane/](../crosslinking/oxetane/)）と既定モノマーOXT-221
+（`CCC1(COCC2(CC)COC2)COC1`）を使います。ほかの環や反応は`--activation-yaml`／`--reactions-yaml`で渡します。
+ルールは`definitions/`へコピーし、SHA-256で変更を検査します。表の見出しは環に合わせて
+「Epoxide …」「Oxetane …」になります。
+
+単分子の液体は800 K・1 atmで沸騰・空洞化しうるので、各段階の終了時密度を
+`dry_result.json`の`thermal_history_density`に記録し、800 Kの密度が開始時の0.7倍を下回ると
+Tg/CTEと300 K NPTのチェックを不合格にします（後述）。必要なら`--high-temperature`で下げられます。
+
+### 架橋プロジェクト（`crosslink`）
+
+```bash
+python $NP crosslink <単分子dir> --activation-fraction 0.05 0.1     # 子プロジェクト af0.05, af0.1
+python $NP crosslink <単分子dir> --activation-count 4 8 --name ...  # n4, n8（--nameは1密度のときだけ）
+```
+
+- 架橋レプリカNは単分子レプリカNの★構造から始めます（番号で固定）。レプリカ数の既定と上限は単分子のレプリカ数です。
+  単分子レプリカNが未完了なら、`run`はエラーで止まり、`submit`は完了まで待ちます（単分子が失敗した番号は`blocked`）。
+- 反応温度は単分子のTに固定です（変えたいときは別の単分子プロジェクトを作ります）。
+- 開始点を作った後、opt → NVT 0.1 fs × 10000 step → T・1 atmのNPT 100 ps（`--equilibration-steps`）で緩和してから
+  反応cycleへ進みます。開始点で足すHの分だけ原子数は増えます。
+- seedの既定は単分子と同じなので、架橋レプリカNのseedは単分子レプリカNと同じです。開始点の選択順が密度間で共通になり、
+  割合を増やすと開始点の集合が入れ子になります（密度間の比較の雑音が減ります）。`--seed`で変えられます。
+- 単分子の`project.json`を作成後に変えると、架橋側は実行を拒否します。単分子レプリカの★構造が架橋後に変わった場合も
+  （`reseed`など）、`network_origin.json`のハッシュと一致しないので拒否します。
+- 残膜率`structure.film_retention_volume_ratio`は、架橋膜の熱履歴後300 K NPT平均体積 ÷ **同じ番号の単分子レプリカの
+  300 K NPT平均体積**です。両方とも300 Kなので熱膨張は入りません（`--remove-sol-fraction`なら分子はゾル削除後のゲル）。
+- 開始点数・割合（実際の値）、架橋開始直前の体積あたりの開始点数、反応率、活性末端1個あたりの連鎖長などを
+  `network_origin.json`と「Network construction」に出します。
+
+反応の設定は従来どおり指定できます: `--cycles`（既定5000）、`--target-conversion`（既定0.995）、
+`--max-reactions-per-cycle`、`--reaction-cutoff`（既定4 Å）、`--max-reaction-cutoff`（既定6 Å）、
+`--fixed-reaction-cutoff`、`--reaction-minimization-iterations`、`--reaction-minimization-radius`（既定12 Å、0で系全体）、
+`--post-reaction-md-steps`、`--relaxation-stages`（JSON文字列かJSON/YAMLファイル。書式は
+[crosslinking/README.md](../crosslinking/README.md#反応距離の上限と反応後の緩和)）、`--stop-after-idle-cycles`（既定200）、
+`--template-workers`（既定4）、`--final-relaxation-steps`（既定1000）、`--final-md-steps`（既定1 ns）、
+`--save-trajectory`。`--remove-sol-fraction`で、現像を模して周期次元3の網目だけを残し、
 未反応モノマーと網目につながっていないオリゴマー（ゾル分）を除いた構造を物性評価に使います
-（既定OFF。抜けた体積は熱履歴の昇温NPTで緩和。ゾル分率と削除数、ゲルだけで数えたエポキシ反応率`gel_epoxide_conversion`
-（ゲル中の反応済エポキシ／ゲルのモノマーがもともと持っていたエポキシ）は`network_origin.json`に記録。
-ゲル化点に達していなければそのレプリカは停止）。
-架橋は既定で90 ℃（363.15 K）で行います。初期NPTの後、反応前に同じ温度で100 ps samplingし、
-未反応エポキシの数密度・配位数・接触グラフの最大クラスター分率・MSD（`crosslinking/README.md`参照）を
-物性サマリーの「Pre-reaction equilibrium」に出します。
-架橋開始直前（初期NPT・反応前samplingの後）の体積で開始点数を割った体積あたりの初期activation数
-`activation_density_nm3`も`network_origin.json`と物性サマリーに出力します。
-残膜率`structure.film_retention_volume_ratio`は、熱履歴後の300 K乾燥NPT観測の平均体積／反応前の300 Kでの体積です。
-分母は、加圧NPTの後・90 ℃へ上げる前に300 K・1 atmで200 ps回したNPTの後半平均です（`reference_before_crosslinking`）。
-両方とも300 Kなので熱膨張は入りません（`--remove-sol-fraction`なら分子はゾル削除後のゲルの体積）。
-活性末端1個あたりの連鎖長（数平均・重量平均・分散度・最長）も物性サマリーに出します（`crosslinking/README.md`参照）。
-packing（既定0.5 g/cm³、`--packing-density`。PAVESの局所緩和あり、環を貫通する結合があれば停止）後、1 atmの初期NPTの前に300 K・200 MPa・50 psの加圧NPTでvoidを潰します。
-`--compression-pressure-mpa`、`--compression-steps`（1 fs刻み、0で無効）で変更できます。
-`--smiles`（旧名`--epoxy-smiles`も可）、`--total-atoms`、`--target-conversion`、`--cycles`、
-`--activation-fraction`または`--activation-count`で変更できます。
+（ゾル分率・削除数・ゲルだけで数えた環の反応率`gel_epoxide_conversion`を記録。ゲル化点未満ならそのレプリカは停止）。
+溶媒は`--solvent NAME=SMILES`（複数可）と`--solvent-molecules`で架橋プロジェクトに指定します。
+YAMLや段の設定は作成時に`project.json`へ取り込まれ、初回run後に設定が変わると停止します。
+条件を変える場合は新しいプロジェクトを作成してください。
 
-### エポキシ以外の環（オキセタンなど）
+`--activation-count 0`（`n0`）は開始点なし・反応なしで、単分子の★構造をそのまま熱履歴と300 K物性に回します。
 
-反応点はエポキシに固定されておらず、開始点ルール（`activation.yaml`）の`target_smarts`に
-一致する環を数えます。`--chemistry oxetane`で、オキセタン用のYAML
-（[crosslinking/oxetane/](../crosslinking/oxetane/)、エポキシ版と同じOH*リレーの四員環版）と
-既定モノマーOXT-221（`CCC1(COCC2(CC)COC2)COC1`）を使います。モノマーは`--smiles`で変えられます。
+### 保存済みネットワーク（`network`）
 
 ```bash
-python workflows/network_properties/network_properties.py new workflows/network_properties/output/oxetane \
-  --chemistry oxetane --smiles 'CCC1(COCC2(CC)COC2)COC1' --replicates 4 --platform CUDA
+python $NP network workflows/network_properties/output/saved --network final.structure.json --solvent water=O
 ```
 
-ほかの環や反応は`--activation-yaml`／`--reactions-yaml`で渡します。モノマーに`target_smarts`へ
-一致する部位がなければ、開始点0の場合を除いて停止します。
-レポートには未反応の環を`epoxide_rings`（三員環のO）と`oxetane_rings`（四員環のO）で数えます。
-
-### 反応させない（反応率0の単分子）
-
-`--activation-fraction 0`または`--activation-count 0`で、開始点を作らず反応cycleも省きます
-（`project.json`では`cycles: 0`、`target_conversion: null`になります）。
-packing、加圧、1 atmの緩和、最終MDだけを行った未反応モノマーの構造から、同じ熱履歴と物性評価を行います。
-目標反応率は適用されないので、そのレプリカも集計のチェック対象に入ります。
-反応点のない分子（環を持たない液体など）も開始点0なら計算できます。
-反応距離の上限は`--max-reaction-cutoff`（既定6 Å、開始距離の既定は4 Å）で変えられます。
-開始距離は`--reaction-cutoff`、距離の固定は`--fixed-reaction-cutoff`です。
-反応後の緩和は`--reaction-minimization-iterations`、`--reaction-minimization-radius`（反応点から何Å以内を最小化するか。既定12、0で系全体）、`--post-reaction-md-steps`、
-`--relaxation-stages`（JSON文字列かJSON/YAMLファイル）で設定します。
-段の書式は[crosslinking/README.md](../crosslinking/README.md#反応距離の上限と反応後の緩和)を参照してください。
-例:
-
-```bash
-python workflows/network_properties/network_properties.py new workflows/network_properties/output/epoxy_all \
-  --replicates 4 --seed 31415 --max-reactions-per-cycle 50 --solvent water=O --platform CUDA \
-  --max-reaction-cutoff 5 --post-reaction-md-steps 1000 --reaction-minimization-iterations 5000 \
-  --relaxation-stages workflows/crosslinking/relaxation.example.yaml
-```
-
-反応終了後は0.1 fs×1000 stepの緩和と1 atm・1 nsのMD（`--final-relaxation-steps`、`--final-md-steps`）を経て最終構造を保存します。
-YAMLファイルの中身は`new`の時点で`project.json`に取り込まれます。そのため、後でファイルを書き換えても既存projectには影響しません。
-
-活性点が網目に埋もれて反応が止まった後の空回りは、`--stop-after-idle-cycles`（既定200、0で無効）で打ち切ります。
-未知の反応テンプレートは`--template-workers`（既定4）個のプロセスで並列に計算します。
-詳細は[crosslinking/README.md](../crosslinking/README.md#計算速度)を参照してください。
-これらは`project.json`の`crosslinking`（`max_reaction_cutoff`、`minimization_iterations`、
-`post_reaction_md_steps`、`relaxation_stages`）にも記録されます。初回run前なら、そこを直接編集しても構いません。
-独自の反応ルールは`--activation-yaml`、`--reactions-yaml`で渡します。
-これらはproject内の`crosslinking/`へコピーし、SHA-256で変更を検査します。
-`project.json`の`crosslinking`以下には全構築条件を保存します。
-初回run後に設定が変わると既存結果との混在を防ぐため停止します。
-条件を変える場合は新しいprojectを作成してください。
-
-保存済み構造を共通入力として使う場合だけ、作成時に`--network`を指定します。
-その場合は入力JSONをproject内にコピーし、各レプリカは熱緩和から開始します。
-`--network`とエポキシ構築条件は同時に指定できません。
+入力JSONをproject内にコピーし、各レプリカは熱履歴から開始します（共通トポロジー、熱履歴だけが独立）。
 
 ## ローカルGPUへレプリカをジョブ投入する
 
-`new --replicates N`で指定した本数を、`submit`でこのマシンのGPUへ投入できます。
+`--replicates N`で指定した本数を、`submit`でこのマシンのGPUへ投入できます。
 GPU番号は`nvidia-smi`に表示される物理GPU番号です。
+単分子プロジェクトを指定すると、その`crosslinks/`の架橋プロジェクトもまとめて投入します。
+架橋レプリカNは単分子レプリカNの完了を待って開始し、待っている間は他のジョブにGPUを使います。
+単分子レプリカNが失敗すると、架橋レプリカNは`blocked`になります（`reseed`で単分子を直してから再度`submit`）。
+`--monomer-only`を付けると、`crosslinks/`があっても単分子のレプリカだけを投入します
+（単分子を全部終わらせてから架橋を流す場合。架橋は後で同じディレクトリを`submit`すれば、完了済みの単分子を省いて投入されます）。
+`--mechanical`を付けると、300 K構造ができている架橋・ネットワークのレプリカの弾性計算だけを投入します。
 
 ```bash
-# 例：4レプリカ、base seed 31415のプロジェクトを作成
-python workflows/network_properties/network_properties.py new \
-  workflows/network_properties/output/epoxy_gpu \
-  --replicates 4 --seed 31415 --max-reactions-per-cycle 50 \
-  --solvent water=O --platform CUDA
+# 例：4レプリカ、base seed 31415の単分子と、2つの架橋密度
+python workflows/network_properties/network_properties.py monomer \
+  workflows/network_properties/output/epoxy_gpu --replicates 4 --seed 31415 --platform CUDA
+python workflows/network_properties/network_properties.py crosslink \
+  workflows/network_properties/output/epoxy_gpu --activation-fraction 0.05 0.1 --max-reactions-per-cycle 50
 
 # GPU割り当てとseedを確認する（このコマンドでは起動しない）
 python workflows/network_properties/network_properties.py submit \
@@ -147,9 +180,9 @@ GPUが1台なら`--gpus 0`で全レプリカを順番に実行します。
 
 各レプリカのseedは`project.json`の`seed + replica番号（1始まり）`です（`reseed`した場合を除く）。
 上の例では31416, 31417, 31418, 31419になります。
-既定では、モノマーpack・開始点の選択・架橋反応・熱緩和・物性評価へこのseedを渡します。
-各レプリカの架橋ネットワークを別々に生成し、構築から溶媒評価までの一連を1ジョブとして実行します。
-`--network`モードでは架橋構造が共通で、熱履歴だけが独立になります。
+単分子ではpack・熱履歴・Tの物性へ、架橋では開始点の選択・架橋反応・熱履歴・物性評価へこのseedを渡します。
+単分子レプリカ1本（構築からTの物性まで）、架橋レプリカ1本（架橋から溶媒評価まで）がそれぞれ1ジョブです。
+`network`プロジェクトでは構造が共通で、熱履歴だけが独立になります。
 
 `submit`はバックグラウンドの管理プロセスを起動して戻ります。
 端末を閉じてもジョブは継続し、`jobs/replica_01.log`などに標準出力・エラーを保存します。
@@ -174,16 +207,18 @@ python workflows/network_properties/network_properties.py reseed \
 新しいseedは`seed + k×レプリカ数 + replica番号`（k = 1, 2, …）のうち、そのprojectでまだ
 使っていない最小の値です（`--seed`で1レプリカに明示も可）。初回のseedや他のレプリカと重なりません。
 旧seedの出力は`failed_attempts/replica_03_seed31418_1/`へ移し（エラーログも含めて保存）、
-レプリカは構築（packing）からやり直します。各段階がseedに依存するため、途中からは再開しません。
+レプリカは最初（単分子ならpacking、架橋なら単分子構造への開始点作成）からやり直します。
+単分子レプリカをreseedすると、そのレプリカから作った架橋レプリカは出発構造が変わるため実行を拒否します
+（架橋側も同じ番号をreseedしてください）。各段階がseedに依存するため、途中からは再開しません。
 割り当ては`seed_overrides.json`に記録し、`project.json`は変更しません
 （他のレプリカの実行条件の指紋はそのままです）。`status`、`report.md`、`replica_seeds`にも新しいseedが出ます。
 対象は`failed`状態のレプリカだけです。完了済みや、強制終了で状態が残っていないレプリカは`--force`が必要です。
 実行中のレプリカやGPUジョブの投入中は拒否します。`--submit`を付けない場合は、あとで`submit`すれば
 未完了のレプリカとして実行されます。
 
-`status`は各レプリカの現在の計算段階（架橋構築、熱履歴の各温度、NVT、弾性、
-溶媒ごとのpack・挿入自由エネルギー・拡散MD）と経過時間、架橋中なら最新のcycleと反応率、
-ジョブログの最終行を表示します。段階は`replica_XX/progress.json`に記録し、直近の履歴も残します。
+`status`は単分子と各架橋プロジェクトのレプリカごとに、現在の計算段階（単分子の構築、架橋、熱履歴の各温度、
+Tの段階、NVT、弾性、溶媒ごとのpack・挿入自由エネルギー・拡散MD）と経過時間、架橋中なら最新のcycleと反応率、
+ジョブログの最終行を表示します（投入前でも段階の記録から表示します）。段階は`replica_XX/progress.json`に記録し、直近の履歴も残します。
 ランチャーやワーカーのPIDが存在しない、または終了済みで回収されていない（zombie）場合は
 `status`が警告します。その場合は各レプリカの状態を確認し、再度`submit`すると未完了分を再開します。
 
@@ -192,8 +227,8 @@ python workflows/network_properties/network_properties.py reseed \
 ランチャーは原因の1行を`jobs/status.json`の`error`へ記録し、今回の試行分のログ末尾300行を
 `jobs/replica_XX.error.log`へ保存します。SIGKILLなどのシグナルで強制終了された場合は
 シグナル名を記録します（SIGKILLはメモリ不足時のOOM killerでも発生します）。
-構築結果は`replica_XX/crosslinking/results/epoxy/`、
-その入力・到達反応率・構造ハッシュは`replica_XX/network_origin.json`に記録します。
+単分子の構築結果は`replica_XX/build/results/monomer/`、架橋の結果は`replica_XX/crosslinking/results/network/`、
+架橋の出発構造・到達反応率・構造ハッシュは`replica_XX/network_origin.json`に記録します。
 
 同じprojectへの二重投入、および同じレプリカの二重実行はロックで拒否します。
 失敗したレプリカがあっても他のレプリカは継続し、全ジョブ終了時にレポートとCSVを集計します。
@@ -204,7 +239,8 @@ python workflows/network_properties/network_properties.py reseed \
 その際は当該レプリカの未完了構築出力を作り直し、局所Sageテンプレートのキャッシュは再利用します。
 最大cycleまでに反応率の目標へ届かなくても、その実現構造で後続評価を行います。
 到達反応率と未達フラグをレポートに示し、未達レプリカはチェック通過値の集計に含めません。
-別projectへ同じGPUを指定した場合のGPU共有は制限しないため、割り当てはproject間で調整してください。
+投入の単位（単分子とその架橋、または1つのプロジェクト）が異なれば、同じGPUを指定しても共有は制限しないため、
+割り当ては投入間で調整してください。
 
 単一レプリカを手動で実行することもできます。
 
@@ -213,7 +249,7 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
   workflows/network_properties/output/epoxy_gpu --replica 1
 ```
 
-通常の`run`は従来どおり全レプリカを順次実行します。
+通常の`run`は全レプリカを順次実行します。単分子プロジェクトに`--all`を付けると、続けて全架橋プロジェクトも実行します。
 集計ファイルにもロックをかけ、並列ジョブや手動`report`との書き込み競合を防ぎます。
 `--smoke --replicates 2`のように、動作確認でも複数レプリカを明示できます。
 
@@ -243,7 +279,7 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 体積制御はwheelのconstraint group座標に対する
 周期架橋対応Monte Carlo更新です。一般的な分子単位barostatへの置き換えはしません。
 
-**100 Kまで冷却した後に300 Kへ戻した構造**を、弾性・溶媒評価に使います。
+**100 Kまで冷却した後に300 Kへ戻した構造**を、弾性・溶媒評価に使います（単分子ではTの段階もここから続けます）。
 冷却途中の300 K構造も別名で保存します。再加熱でTgを再評価する設定ではありません。
 800 Kで化学的に分解する場合でも、固定トポロジーMDには分解機構は含まれません。
 
@@ -251,7 +287,7 @@ CUDA_VISIBLE_DEVICES=0 python workflows/network_properties/network_properties.py
 800 K・1 atmで密度が300 Kの0.50倍（1.07→0.54 g/cm³）まで下がり、セル内に半径6 Åを超える空洞が
 できました（沸騰・キャビテーション）。この空隙は冷却後のガラスに残り、Tg/CTEのフィットと300 Kの揺らぎを
 壊します。網目は蒸発できないので、これは単分子・オリゴマーに特有です。
-`new --high-temperature 600`などで最高温度を変えられます（`project.json`の`high_K`）。
+単分子プロジェクトも既定は800 Kのままです。`--high-temperature 600`などで最高温度を変えられます（`project.json`の`high_K`）。
 各段階の終了時密度は`dry_result.json`の`thermal_history_density`に記録し、高温緩和後の密度が
 開始時の0.7倍を下回ると`possible_vaporization: true`として、冷却フィットと300 K NPTのチェックを不合格にします。
 
@@ -365,6 +401,11 @@ numpyだけで動くので、OVITOの環境でも実行できます。
 
 ## 弾性
 
+弾性は既定では計算しません。架橋膜（または`network`）の300 K構造ができた後に、
+`mechanical <プロジェクト> [--replica N]`か`submit <プロジェクト> --mechanical`で実行します。
+結果は`replica_XX/mechanical/`に保存し、`report.md`の「Elasticity」と架橋シリーズのYoung率に出ます。
+単分子の液体には実行できません。
+
 弾性は300 K構造から6成分×正負1%のひずみへ分岐します。
 各分岐で200 ps NVT緩和、1 ns観測を行い、全ポテンシャルの微小セル変形差分
 （PMEも含む）と運動項から応力を計算します。Voigt順序はxx, yy, zz, yz, xz, xy、
@@ -426,16 +467,18 @@ wheelの更新は自動では検出しません。応力が変わる変更では
 project.json / run_signature.json
 seed_overrides.json                 # reseedしたレプリカの新しいseedと履歴
 failed_attempts/                    # reseed前の失敗した試行（レプリカとしては集計しない）
-crosslinking/                       # 既定モード：コピーした反応・開始点ルール
-input.structure.json               # --networkモードのみ：共通入力構造
+definitions/                        # 単分子・架橋：コピーした開始点・反応ルール
+input.structure.json                # networkのみ：共通入力構造
 summary.json / report.md
 replica_properties.csv              # 各物性を行、各replicaの値・確認状態を列にした一覧
 property_summary.csv                # 平均・標本SD・SEM・有効件数・チェック通過件数
+crosslink_series.csv / .png         # 単分子のみ：架橋密度ごとの比較
 jobs/                               # submit時：投入計画・状態・レプリカごとの実行ログ
 replica_01/
   execution.json                    # レプリカ番号・seed・実行時に見えるGPU
-  network_origin.json               # 既定モード：独立構築の反応率・原子数・構造ハッシュ
-  crosslinking/results/epoxy/        # 既定モード：このレプリカ専用の架橋構造・履歴・設定
+  build/results/monomer/            # 単分子：pack・緩和したモノマー構造（build/done.jsonに記録）
+  crosslinking/results/network/     # 架橋：このレプリカ専用の架橋構造・履歴・設定
+  network_origin.json               # 架橋：出発構造（単分子レプリカ）・反応率・原子数・構造ハッシュ
   cooling.csv
   cooling_300K.structure.json
   relaxed_100K.structure.json
@@ -443,12 +486,14 @@ replica_01/
   dry_result.json
   00_... / ... / 06_production_300K/  # samples, state, structure, done marker
   07_nvt_300K/                      # direct Cv and fixed-charge dielectric response
-  mechanical/result.json
+  363.15K/                          # 単分子：Tの段階（result.json、relaxed_363.15K.structure.json）
+  mechanical/result.json            # 任意
   solvents/water/
     packed/
     infinite_dilution_free_energy/  # windows, overlap, checkpoints, result
     diffusion/                     # MSD, diagnostics, OVITO frames, final structure
     result.json
+crosslinks/af0.05/ …                # 単分子のみ：架橋プロジェクト（上と同じ構成）
 ```
 
 同じ`run`コマンドで再開します。熱履歴は完了済みの温度・段階のstateから戻し、
@@ -457,7 +502,7 @@ replica_01/
 `report`と`collect`は、実行開始後に`project.json`を変更したプロジェクトを集計しません。
 溶媒MD・自由エネルギーはwheelのcheckpointから再開します。
 熱履歴の再開はOpenMMの乱数状態まで一致する厳密再現ではありません。
-`--network`で共通構造を入力した場合は、異なる架橋トポロジーによるばらつきを含みません。
+`network`で共通構造を入力した場合は、異なる架橋トポロジーによるばらつきを含みません。
 
 `report.md`では各物性をreplicaごとに横並びにし、平均・標本SD・SEM、値が得られた本数、
 既存の収束・フィットチェックを通過した本数も表示します。
@@ -483,18 +528,16 @@ SD/SEMはreplica間のばらつきで、1本しか値がない場合は未定義
 ## 動作確認
 
 ```bash
-OPENMM_CPU_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-python workflows/network_properties/network_properties.py new \
-  workflows/network_properties/output/smoke \
-  --network workflows/crosslinking/results/smoke/final.structure.json \
-  --solvent water=O --solvent-molecules 1 --platform CPU --smoke
-OPENMM_CPU_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-python workflows/network_properties/network_properties.py run \
-  workflows/network_properties/output/smoke
+export OPENMM_CPU_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+NP=workflows/network_properties/network_properties.py
+python $NP monomer workflows/network_properties/output/smoke --platform CPU --smoke --replicates 2
+python $NP crosslink workflows/network_properties/output/smoke --activation-fraction 0.1 0.2 \
+  --solvent water=O --solvent-molecules 1
+python $NP run workflows/network_properties/output/smoke --all
+python $NP mechanical workflows/network_properties/output/smoke/crosslinks/af0.1
 
-python -m unittest discover -s tests -p test_network_properties.py -v
-PAVES_NETWORK_INTEGRATION=1 OPENMM_CPU_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-  python -m unittest discover -s tests -p test_network_properties.py -v
+python -m unittest discover -s tests -v
+PAVES_NETWORK_INTEGRATION=1 python -m unittest discover -s tests -p test_network_properties.py -v
 ```
 
 **`--smoke`は全段階を極端に短縮する接続テストです。値に物理的意味はありません。**

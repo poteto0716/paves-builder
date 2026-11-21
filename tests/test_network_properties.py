@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from workflows.network_properties.analysis import thermodynamics, analyze_npt, analyze_nvt, aggregate, topology, KB, NA, DA
 from workflows.network_properties.mechanical import isotropic_moduli, stress, context_for, CONVERSION_GPA
-from workflows.network_properties.network_properties import DEFAULTS, main, report, temperature_grid, validate
+from workflows.network_properties.network_properties import DEFAULTS, digest, main, report, temperature_grid, validate
 
 
 class CoolingRefitTests(unittest.TestCase):
@@ -404,14 +404,17 @@ class ConfigurationTests(unittest.TestCase):
         stages = [dict(ensemble='NVT', steps=10000 + i, timestep=.1) for i in range(10)]
         self.assertEqual(load_relaxation_stages(json.dumps(stages)), stages)
 
-    def test_network_input_refuses_sol_removal(self):
-        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stderr(io.StringIO()) as error:
+    def test_saved_network_project_checks_its_input(self):
+        with tempfile.TemporaryDirectory() as temporary, contextlib.redirect_stderr(io.StringIO()) as error, \
+             contextlib.redirect_stdout(io.StringIO()):
             source = Path(temporary)/'source.json'
-            source.write_text(json.dumps(dict(graphs=[dict(atoms=[{'partial_charge':0.}])], positions=[[0,0,0]],
+            source.write_text(json.dumps(dict(graphs=[dict(atoms=[{'mass':12.}])], positions=[[0,0,0]],
                                               box_vectors=[[3,0,0],[0,3,0],[0,0,3]])))
-            self.assertEqual(main(['new', str(Path(temporary)/'p'), '--network', str(source),
-                                   '--remove-sol-fraction']), 1)
-        self.assertIn('--network cannot be combined', error.getvalue())
+            self.assertEqual(main(['network', str(Path(temporary)/'p'), '--network', str(source)]), 1)
+            self.assertIn('saved partial charges', error.getvalue())
+            self.assertFalse((Path(temporary)/'p').exists())
+            with self.assertRaises(SystemExit):  # construction options belong to monomer/crosslink projects
+                main(['network', str(Path(temporary)/'q'), '--network', str(source), '--remove-sol-fraction'])
 
     def test_report_and_collect_refuse_a_configuration_edited_after_starting(self):
         from workflows.network_properties.execution import configuration_fingerprint
@@ -458,43 +461,44 @@ class ConfigurationTests(unittest.TestCase):
 @unittest.skipUnless(os.environ.get('PAVES_NETWORK_INTEGRATION') == '1',
                      'set PAVES_NETWORK_INTEGRATION=1 with the OpenFF / public-wheel environment')
 class InstalledWheelIntegration(unittest.TestCase):
-    def test_epoxy_all_properties_and_resume(self):
-        import shutil
+    def test_monomer_crosslink_mechanical_and_resume(self):
         env = dict(os.environ, OPENMM_CPU_THREADS='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
-        def run(args, cwd):
-            result = subprocess.run([sys.executable, *map(str,args)], cwd=cwd, env=env,
-                                    capture_output=True, text=True, timeout=300)
+        def run(*args):
+            result = subprocess.run([sys.executable, str(ROOT/'workflows/network_properties/network_properties.py'),
+                                     *map(str,args)], cwd=ROOT, env=env, capture_output=True, text=True, timeout=1200)
             self.assertEqual(result.returncode,0,result.stdout+result.stderr)
         with tempfile.TemporaryDirectory() as temp:
-            p = Path(temp)
-            for name in ('activation.yaml','reactions.yaml'):
-                shutil.copy2(ROOT/'workflows/crosslinking'/name,p/name)
-            run([ROOT/'workflows/crosslinking/crosslinking.py','--project','epoxy',
-                 '--total-atoms','500','--activation-count','1','--platform','CPU',
-                 '--compression-steps','2','--equilibration-steps','2','--cycles','1','--nvt-steps','2','--npt-steps','2',
-                 '--max-reactions-per-cycle','1','--reaction-cutoff','10','--max-reaction-cutoff','10',
-                 '--minimization-iterations','100'],p)
-            source = p/'results/epoxy/final.structure.json'
-            original = source.read_bytes()
-            script = ROOT/'workflows/network_properties/network_properties.py'
-            run([script,'new',p/'evaluation','--network',source,'--platform','CPU',
-                 '--solvent','water=O','--solvent-molecules','1','--smoke'],p)
-            run([script,'run',p/'evaluation'],p)
-            project = p/'evaluation'
-            base = project/'replica_01'
-            relaxed = json.loads((base/'relaxed_300K.structure.json').read_text())
-            self.assertEqual(json.loads(original)['graphs'],relaxed['graphs'])
-            self.assertEqual(source.read_bytes(), original)
-            for name in ('cooling_300K.structure.json','relaxed_100K.structure.json','dry_result.json',
-                         'mechanical/result.json'):
-                self.assertTrue((base/name).is_file(),name)
-            wet = json.loads((base/'solvents/water/result.json').read_text())
+            root = Path(temp)/'TMPTGE'
+            run('monomer', root, '--platform', 'CPU', '--smoke')
+            run('crosslink', root, '--activation-fraction', '0.1', '--solvent', 'water=O', '--solvent-molecules', '1')
+            run('run', root, '--all')
+            base = root/'replica_01'
+            relaxed = base/'363.15K/relaxed_363.15K.structure.json'
+            for name in ('build/done.json', 'dry_result.json', 'relaxed_300K.structure.json',
+                         '363.15K/result.json', '363.15K/03_production/reactive_rings/reactive_rings.json'):
+                self.assertTrue((base/name).is_file(), name)
+            at_T = json.loads((base/'363.15K/result.json').read_text())
+            density = at_T['reactive_ring_density']
+            self.assertEqual(density['ring'], 'epoxide')
+            self.assertAlmostEqual(density['number_density_300K_nm3'],
+                density['rings']/json.loads((base/'dry_result.json').read_text())['npt']['volume_nm3_mean'])
+            child = root/'crosslinks/af0.1'
+            origin = json.loads((child/'replica_01/network_origin.json').read_text())
+            self.assertEqual(origin['monomer']['structure_sha256'], digest(relaxed))
+            self.assertFalse((child/'replica_01/mechanical').exists())
+            wet = json.loads((child/'replica_01/solvents/water/result.json').read_text())
             self.assertFalse(wet['infinite_dilution_free_energy']['convergence_verified'])
-            self.assertIsNone(wet['fixed_loading']['diffusion']['diffusion_coefficient_m2_s'])
-            before = (project/'summary.json').read_bytes()
-            run([script,'run',project],p)
-            self.assertEqual((project/'summary.json').read_bytes(),before)
-            self.assertTrue((project/'report.md').is_file())
+            run('mechanical', child)
+            self.assertTrue((child/'replica_01/mechanical/result.json').is_file())
+            series = (root/'crosslink_series.csv').read_text()
+            self.assertIn('af0.1', series)
+            before = (child/'summary.json').read_bytes()
+            run('run', root, '--all')
+            self.assertEqual((child/'summary.json').read_bytes(), before)
+            report_text = (root/'report.md').read_text()
+            for text in ('Epoxide number density (300 K)', 'Epoxide number density (363.15 K)',
+                         'Epoxide diffusion coefficient', 'Crosslink series'):
+                self.assertIn(text, report_text)
 
 
 if __name__ == '__main__':

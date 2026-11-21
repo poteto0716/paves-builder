@@ -202,12 +202,12 @@ class PublicReactiveWorkflows(unittest.TestCase):
             self.assertEqual(json.loads((output / 'metrics.json').read_text())['stop_reason'], 'max_cycles')
             # Initial state plus three 2-step intervals of the pre-reaction equilibrium at the default 90 C reaction temperature.
             metrics = json.loads((output / 'metrics.json').read_text())
-            pre = metrics['pre_reaction_epoxides']
+            pre = metrics['pre_reaction_rings']
             self.assertEqual((pre['frames'], pre['temperature_K'], pre['contact_cutoffs_A']), (4, 363.15, [10.]))
-            self.assertEqual(pre['epoxides'], metrics['initial_epoxide_sites'] - 1)
-            self.assertAlmostEqual(pre['epoxide_number_density_nm3']['mean'] * pre['volume_nm3']['mean'],
-                                   pre['epoxides'], delta=.01 * pre['epoxides'])
-            self.assertTrue((output / 'pre_reaction/epoxide_msd.csv').is_file())
+            self.assertEqual((pre['rings'], pre['ring']), (metrics['initial_epoxide_sites'] - 1, 'epoxide'))
+            self.assertAlmostEqual(pre['ring_number_density_nm3']['mean'] * pre['volume_nm3']['mean'],
+                                   pre['rings'], delta=.01 * pre['rings'])
+            self.assertTrue((output / 'pre_reaction/reactive_ring_msd.csv').is_file())
             # 300 K reference volume (mean of the second half of 4 one-step frames) before heating to 90 C.
             reference = metrics['reference_before_crosslinking']
             self.assertEqual((reference['temperature_K'], reference['frames_averaged']), (300., 2))
@@ -294,7 +294,8 @@ class PublicReactiveWorkflows(unittest.TestCase):
         # The gel holds 5 monomers (origins 0-4) with 3 rings each; two rings
         # stay closed in the gel and one in the removed column does not count.
         gel = workflow.gel_site_conversion(trimmed, origin, {('n1', 'n2', 'n3'), ('n4', 'n5', 'n6'),
-                                                             ('x0', 'x1', 'x2'), ('n9', 'x3', 'x0')}, 3)
+                                                             ('x0', 'x1', 'x2'), ('n9', 'x3', 'x0')},
+                                            [3] * (max(origin.values()) + 1))
         self.assertEqual(gel, dict(gel_initial_epoxide_sites=15, gel_unreacted_epoxide_sites=2,
                                    gel_reacted_epoxide_sites=13, gel_epoxide_conversion=13 / 15))
         tracker = SimpleNamespace(to_dict=lambda: {'per_rule': {'relay': {'conversion_reactant': 1}}},

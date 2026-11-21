@@ -131,7 +131,7 @@ class ReplicaSummaryTests(unittest.TestCase):
         self.assertEqual(bulk['replicas']['replica_01']['status'],'smoke')
 
     def test_300K_void_fraction_and_crosslink_target_are_in_replica_summary(self):
-        self.cfg['input_mode']='epoxy'
+        self.cfg.update(input_mode='crosslink',parent='monomer',chemistry='epoxy')
         for replica, fraction, reached in [('replica_01',.1,True),('replica_03',.3,False)]:
             self.dry(replica,2.,True)
             path=self.project/replica/'dry_result.json'
@@ -148,6 +148,33 @@ class ReplicaSummaryTests(unittest.TestCase):
         self.assertEqual(void['checked_mean'],.1)
         self.assertEqual(values['npt.bulk_modulus_isothermal_GPa']['n_checks_passed'],1)
         self.assertEqual(values['crosslinking.conversion']['replicas']['replica_03']['value'],.8)
+
+    def test_monomer_ring_density_at_300K_and_T_and_diffusive_check(self):
+        self.cfg.update(input_mode='monomer', chemistry='oxetane', temperature_K=363.15, solvents=[],
+                        ring_contact_cutoffs_A=[4.])
+        for replica, alpha in (('replica_01', 1.), ('replica_02', 1.6)):
+            self.dry(replica, 2., True)
+            self.put(f'{replica}/build/done.json', dict(molecules=10, atoms=400, reactive_sites=20))
+            self.put(f'{replica}/363.15K/result.json', dict(smoke=False,
+                npt=dict(estimates=dict(density_g_cm3=1.), sampling_checks_passed=True),
+                nvt=dict(Cv_direct_J_kg_K=1500., sampling_checks_passed=False),
+                reactive_ring_density={'number_density_300K_nm3': 2., 'number_density_300K_mmol_cm3': 3.3,
+                                       'number_density_363.15K_nm3': 1.9, 'number_density_363.15K_mmol_cm3': 3.2},
+                reactive_rings=dict(by_cutoff_A={'4': dict(coordination_number=dict(mean=.5),
+                                                           largest_cluster_fraction=dict(mean=.1))},
+                                    msd_final_A2=10., diffusion_coefficient_m2_s=1e-10, msd_exponent_alpha=alpha)))
+        _, values = collect(self.project, self.cfg)
+        density = values['rings.number_density_300K_nm3']
+        self.assertEqual((density['label'], density['group'], density['mean']),
+                         ('Oxetane number density (300 K)', '300 K thermodynamics', 2.))
+        self.assertEqual(values['at_T.rings.number_density_mmol_cm3']['label'], 'Oxetane number density (363.15 K)')
+        self.assertEqual(values['at_T.npt.density_g_cm3']['label'], 'Density (363.15 K)')
+        self.assertEqual(values['at_T.rings.coordination_4A']['mean'], .5)
+        # D counts as checked only in the diffusive regime (alpha near 1).
+        diffusion = values['at_T.rings.diffusion_coefficient_m2_s']
+        self.assertEqual((diffusion['n_available'], diffusion['n_checks_passed']), (2, 1))
+        self.assertEqual(values['build.reactive_sites']['label'], 'Oxetane rings')
+        self.assertFalse(any(key.startswith('network.') or key.startswith('mechanical.') for key in values))
 
     def test_csv_exports_units_status_and_blank_missing_values(self):
         self.dry('replica_01',2.,True)
