@@ -121,6 +121,26 @@ class ProjectCreationTests(unittest.TestCase):
         self.assertEqual(quiet(['crosslink', str(plain), '--activation-count', '3']), 1)
         self.assertEqual(quiet(['crosslink', str(plain), '--activation-count', '0']), 0)
 
+    def test_chemistry_follows_the_ring_of_the_smiles(self):
+        # An oxetane SMILES without --chemistry gets the oxetane preset (sites, YAMLs, labels).
+        guessed = self.root / 'guessed'
+        self.assertEqual(quiet(['monomer', str(guessed), '--platform', 'CPU', '--smiles', 'CCC1(CO)COC1']), 0)
+        cfg = json.loads((guessed / 'project.json').read_text())
+        self.assertEqual((cfg['chemistry'], cfg['reactive_sites_per_molecule']), ('oxetane', 1))
+        self.assertIn('oxetane_OH_relay', (guessed / 'definitions/reactions.yaml').read_text())
+        # A preset whose ring the monomer lacks is refused; a monomer with both rings needs --chemistry.
+        self.assertEqual(quiet(['monomer', str(self.root / 'wrong'), '--platform', 'CPU',
+                                '--smiles', 'CCC1(CO)COC1', '--chemistry', 'epoxy']), 1)
+        self.assertFalse((self.root / 'wrong').exists())
+        both = 'C1OC1COCC2(CC)COC2'
+        self.assertEqual(quiet(['monomer', str(self.root / 'both'), '--platform', 'CPU', '--smiles', both]), 1)
+        self.assertEqual(quiet(['monomer', str(self.root / 'both'), '--platform', 'CPU', '--smiles', both,
+                                '--chemistry', 'oxetane']), 0)
+        self.assertEqual(monomer.ring_label(dict(chemistry='oxetane', build=dict(smiles=both))), 'Reactive ring')
+        # The ring label comes from the molecule, not from the preset.
+        self.assertEqual(monomer.ring_label(dict(chemistry='epoxy', build=dict(smiles='CCC1(CO)COC1'))), 'Oxetane')
+        self.assertEqual(monomer.ring_label(dict(chemistry='oxetane')), 'Oxetane')
+
     def test_cutoff_and_relaxation_options_reach_crosslinking(self):
         from workflows.crosslinking.crosslinking import load_relaxation_stages
         stages = self.root / 'relax.yaml'

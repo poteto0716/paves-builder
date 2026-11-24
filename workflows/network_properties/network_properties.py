@@ -215,14 +215,20 @@ def _create(project, cfg, definitions=None, network=None):
 def new_monomer(args):
     """Monomer project: build at T, thermal history, 300 K and T properties."""
     from workflows.network_properties import monomer
-    from workflows.network_properties.construction import (definitions_for, definition_digest, monomer_options,
-                                                           reactive_sites)
+    from workflows.network_properties.construction import (choose_chemistry, definitions_for, definition_digest,
+                                                           monomer_options, reactive_sites)
     project = args.project
     if project.exists():
         raise FileExistsError(f'Project exists: {project}')
     cfg = base_config(args, args.smoke)
     cfg.update(replicates=args.replicates if args.replicates is not None else (1 if args.smoke else DEFAULTS['replicates']))
-    chemistry = args.chemistry or 'epoxy'
+    chemistry = args.chemistry
+    if args.activation_yaml is None:
+        chemistry = choose_chemistry(chemistry, args.smiles)
+        if args.chemistry is None and args.smiles:
+            print(f'Chemistry from the SMILES: {chemistry}', flush=True)
+    chemistry = chemistry or 'epoxy'
+    args.chemistry = chemistry
     cfg.update(input_mode='monomer', schema_version=3, chemistry=chemistry, **json.loads(json.dumps(monomer.DEFAULTS)))
     cfg['temperature_K'] = float(args.temperature)
     if args.smoke:
@@ -886,7 +892,8 @@ def mechanical(args):
 
 def _construction_arguments(parser):
     parser.add_argument('--chemistry', choices=('epoxy', 'oxetane'),
-                        help='ring-opening preset: activation/reaction YAMLs and default monomer (default epoxy)')
+                        help='ring-opening preset: activation/reaction YAMLs and default monomer '
+                             '(default: the ring of --smiles, else epoxy)')
     parser.add_argument('--activation-yaml', type=Path, help='own activation rules (default: the chemistry preset)')
     parser.add_argument('--reactions-yaml', type=Path, help='own reaction rules (default: the chemistry preset)')
 

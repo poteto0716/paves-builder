@@ -30,10 +30,19 @@ import numpy as np
 A2_PS_TO_M2_S = 1e-8
 PER_NM3_TO_MMOL_CM3 = 1 / .60221408  # 1 nm^-3 = 1/0.6022 mmol/cm^3
 RING_NAMES = {3: 'epoxide', 4: 'oxetane'}
+# Every ring-opening ring the relay chemistry knows, whatever the chemistry preset of a project:
+# the target_smarts of crosslinking/activation.yaml and crosslinking/oxetane/activation.yaml.
+RING_SMARTS = {'epoxide': '[C;H2:1]1[O;+0;X2:2][C:3]1', 'oxetane': '[C;H2:1]1[O;+0;X2:2][C:3][C:6]1'}
 
 
 def ring_name(size):
     return RING_NAMES.get(size, f'{size}-membered ring')
+
+
+def groups_ring_name(groups):
+    """Ring name of a group list: epoxide / oxetane when all rings agree, 'reactive ring' when mixed."""
+    names = {ring_name(len(g['heavy'])) for g in groups}
+    return names.pop() if len(names) == 1 else ('reactive ring' if names else None)
 
 
 def _group(heavy, atomic_number, neighbors, hydrogens):
@@ -100,6 +109,12 @@ def smarts_groups(graphs, target_smarts):
                                heavy=[a + offset for a in group['heavy']]))
         offset += len(atoms)
     return groups
+
+
+def reactive_ring_groups(graphs):
+    """All epoxide and oxetane rings (RING_SMARTS) of plain graphs, independent of the activation rule."""
+    groups = [g for smarts in RING_SMARTS.values() for g in smarts_groups(graphs, smarts)]
+    return sorted(groups, key=lambda g: g['oxygen'])
 
 
 def _minimum_image(delta, box, inverse):
@@ -205,10 +220,11 @@ class RingSampler:
         by_cutoff = {f'{cutoff:g}': {key: statistics(f'{key}_{cutoff:g}A')
                                      for key in ('coordination_number', 'largest_cluster_fraction', 'clusters')}
                      for cutoff in self.cutoffs}
-        size = len(self.groups[0]['heavy'])
+        sizes = sorted({len(g['heavy']) for g in self.groups})
         density = statistics('ring_number_density_nm3')
         result = dict(temperature_K=temperature_K, pressure_atm=pressure_atm, sampling_ps=sampling_ps,
-                      frames=len(self.rows), rings=len(self.groups), ring_size=size, ring=ring_name(size),
+                      frames=len(self.rows), rings=len(self.groups), ring_size=sizes[0] if len(sizes) == 1 else sizes,
+                      ring=groups_ring_name(self.groups),
                       volume_nm3=statistics('volume_nm3'), ring_number_density_nm3=density,
                       ring_number_density_mmol_cm3={k: v * PER_NM3_TO_MMOL_CM3 for k, v in density.items()},
                       contact_cutoffs_A=self.cutoffs, by_cutoff_A=by_cutoff,

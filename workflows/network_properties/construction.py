@@ -57,6 +57,26 @@ def _given(args, **names):
     return {key: getattr(args, flag, None) for key, flag in names.items() if getattr(args, flag, None) is not None}
 
 
+def choose_chemistry(chemistry, smiles):
+    """Chemistry preset for a monomer: the given one, else the ring the SMILES carries (epoxy by default).
+
+    A preset whose ring the SMILES lacks while it has the other one is refused: its
+    activation rule would find no site and the monomer would be built without rings.
+    """
+    if not smiles:
+        return chemistry or 'epoxy'
+    found = [name for name, preset in CHEMISTRIES.items()
+             if reactive_sites(smiles, (preset['definitions'] / 'activation.yaml').read_bytes())]
+    if chemistry is None:
+        if len(found) > 1:
+            raise ValueError(f'the monomer has both {" and ".join(found)} rings; choose --chemistry')
+        return found[0] if found else 'epoxy'
+    if found and chemistry not in found:
+        raise ValueError(f'the monomer has no {chemistry} ring but has {" / ".join(found)} rings; '
+                         f'use --chemistry {found[0]} (or omit --chemistry)')
+    return chemistry
+
+
 def monomer_options(args, temperature):
     from workflows.crosslinking.crosslinking import DEFAULT_SMILES
     chemistry = getattr(args, 'chemistry', None) or 'epoxy'

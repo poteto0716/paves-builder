@@ -80,7 +80,7 @@ TMPTGE/                               単分子プロジェクト
 | T | 300 K NPTの続きからTへ20 K以下の刻みで昇温（各100 ps）→ 1 ns緩和 → NPT 2 ns → NVT 1 ns緩和 + 2 ns |
 
 Tの物性は`replica_XX/<T>K/result.json`と`report.md`の「<T> K monomer liquid」に出ます。
-環（エポキシ・オキセタンなど、開始点ルールの`target_smarts`に一致する未反応環）について、
+未反応の環（エポキシ環とオキセタン環をまとめて「環」とする。chemistryや開始点ルールによらず両方を検出）について、
 300 KとTの**単位体積あたりの環の数**（nm⁻³とmmol/cm³。環の数 ÷ その温度のNPT平均体積）を
 それぞれ「300 K thermodynamics」と「<T> K」の表に加えます。
 TのNPT観測（1 psごと）からは、環の配位数・接触グラフの最大クラスター分率（4 Åと6 Å、`ring_contact_cutoffs_A`）、
@@ -90,9 +90,11 @@ TのNPT観測（1 psごと）からは、環の配位数・接触グラフの最
 
 既定のモノマーはTMP triglycidyl ether（`--smiles`で変更）です。`--chemistry oxetane`で
 オキセタン用のYAML（[crosslinking/oxetane/](../crosslinking/oxetane/)）と既定モノマーOXT-221
-（`CCC1(COCC2(CC)COC2)COC1`）を使います。ほかの環や反応は`--activation-yaml`／`--reactions-yaml`で渡します。
-ルールは`definitions/`へコピーし、SHA-256で変更を検査します。表の見出しは環に合わせて
-「Epoxide …」「Oxetane …」になります。
+（`CCC1(COCC2(CC)COC2)COC1`）を使います。`--chemistry`を省略して`--smiles`を渡すと、
+SMILESの環（エポキシ／オキセタン）からchemistryを選びます。SMILESにない環のchemistryを指定した場合と、
+両方の環を持つのに`--chemistry`がない場合はエラーになります。ほかの環や反応は`--activation-yaml`／`--reactions-yaml`で渡します。
+ルールは`definitions/`へコピーし、SHA-256で変更を検査します。表の見出しはモノマーの環に合わせて
+「Epoxide …」「Oxetane …」（両方ある場合は「Reactive ring …」）になります。
 
 単分子の液体は800 K・1 atmで沸騰・空洞化しうるので、各段階の終了時密度を
 `dry_result.json`の`thermal_history_density`に記録し、800 Kの密度が開始時の0.7倍を下回ると

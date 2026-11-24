@@ -5,7 +5,9 @@ to T in temperature_step_K steps of reheat_step_ps each, equilibrates for
 t_equilibration_ps and samples t_production_ps of NPT. That production gives
 the T thermodynamics and the reactive-ring statistics (number density,
 coordination, largest contact cluster, ring MSD and diffusion; see
-workflows/crosslinking/pre_reaction.py); its last frame is saved as
+workflows/crosslinking/pre_reaction.py). The rings are every epoxide and oxetane
+ring of the monomer (pre_reaction.RING_SMARTS), whatever the chemistry preset,
+so the statistics never depend on the activation YAML; its last frame is saved as
 relaxed_<T>K.structure.json, the start of every crosslink replica with the
 same number. An NVT branch at T then gives Cv and the dielectric response.
 """
@@ -27,6 +29,20 @@ def label(cfg):
 
 
 def ring_label(cfg):
+    """Epoxide / Oxetane from the rings of the monomer SMILES (both or neither: Reactive ring).
+
+    Projects without a monomer SMILES (crosslink, network) fall back to the chemistry preset.
+    """
+    smiles = (cfg.get('build') or {}).get('smiles')
+    if smiles:
+        from rdkit import Chem
+        from workflows.crosslinking.pre_reaction import RING_SMARTS
+        molecule = Chem.MolFromSmiles(smiles)
+        if molecule is not None:
+            molecule = Chem.AddHs(molecule)
+            found = [name for name, smarts in RING_SMARTS.items()
+                     if molecule.HasSubstructMatch(Chem.MolFromSmarts(smarts))]
+            return found[0].capitalize() if len(found) == 1 else 'Reactive ring'
     return RING_LABELS.get(cfg.get('chemistry'), 'Reactive ring')
 
 
@@ -73,9 +89,10 @@ def temperature_properties(project, cfg, replica):
     from openmm import unit
     from polypaves.sorption import load_network
     from polypaves.sorption_workflow import FixedLoadingSimulation
-    from workflows.crosslinking.pre_reaction import PER_NM3_TO_MMOL_CM3, ring_name, smarts_groups
+    from workflows.crosslinking.pre_reaction import (PER_NM3_TO_MMOL_CM3, RING_SMARTS, groups_ring_name,
+                                                      reactive_ring_groups)
     from workflows.network_properties.analysis import analyze_npt
-    from workflows.network_properties.construction import network_path, target_smarts
+    from workflows.network_properties.construction import network_path
     from workflows.network_properties.execution import replica_seed
     from workflows.network_properties.network_properties import nvt_properties, phase, write_json
     project = Path(project)
@@ -101,7 +118,7 @@ def temperature_properties(project, cfg, replica):
         for index, t in enumerate(grid[:-1]):
             phase(runner, directory / f'01_heat_{index:03d}', cfg, t, cfg['reheat_step_ps'], base=base)
         phase(runner, directory / '02_equilibrate', cfg, temperature, cfg['t_equilibration_ps'], base=base)
-        groups = smarts_groups(host.graphs, target_smarts(project))
+        groups = reactive_ring_groups(host.graphs)
         observer = (RingObserver(groups, masses, cfg['ring_contact_cutoffs_A'], temperature, cfg['pressure_atm'])
                     if groups else None)
         rows = phase(runner, directory / '03_production', cfg, temperature, cfg['t_production_ps'],
@@ -115,12 +132,11 @@ def temperature_properties(project, cfg, replica):
                  if groups else None)
         count = len(groups)
         volumes = {'300K': dry['npt']['volume_nm3_mean'], label(cfg): npt['volume_nm3_mean']}
-        density = dict(ring=ring_name(len(groups[0]['heavy'])) if groups else None, rings=count,
-            target_smarts=target_smarts(project),
+        density = dict(ring=groups_ring_name(groups), rings=count, ring_smarts=RING_SMARTS,
             **{f'number_density_{key}_nm3': count / volume for key, volume in volumes.items()},
             **{f'number_density_{key}_mmol_cm3': count / volume * PER_NM3_TO_MMOL_CM3
                for key, volume in volumes.items()},
-            definition='unreacted reactive rings (activation target_smarts) / mean NPT cell volume '
+            definition='unreacted epoxide and oxetane rings (ring_smarts) / mean NPT cell volume '
                        'at that temperature; 1 nm^-3 = 1/0.6022 mmol/cm^3')
         nvt = nvt_properties(runner, directory / '04_nvt', cfg, mass, temperature=temperature,
                              equilibration_ps=cfg['t_equilibration_ps'],

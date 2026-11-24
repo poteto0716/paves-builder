@@ -40,7 +40,7 @@ Tは既定363.15 K（90 ℃）。温度・時間は既定値です。各量の�
 
 出典: `replica_XX/<T>K/result.json`（環の統計の詳細は`<T>K/03_production/reactive_rings/`）。
 熱履歴と300 Kの段階の後、300 K NPTの続きからTへ昇温し、1 ns緩和した後のNPT 2 ns（1 psごと）とNVT 2 nsから求めます。
-表の「Epoxide」「Oxetane」はchemistryに合わせた環の名前です。
+表の「Epoxide」「Oxetane」はモノマーSMILESの環の名前です（両方あれば「Reactive ring」）。
 
 | 物性 | キー | 求め方・意味 | 注意 |
 |---|---|---|---|
@@ -54,6 +54,8 @@ Tは既定363.15 K（90 ℃）。温度・時間は既定値です。各量の�
 | 直接Cv・誘電応答（T） | `at_T.nvt.*` | 「300 K NVT」と同じ式をTのNVTに適用 | |
 
 環の定義はエポキシ・オキセタン共通です（環のO、Oに結合したH2を持つ環炭素 = 攻撃されるCH2、環の重原子）。
+Tの環の統計（数密度・配位数・クラスター・MSD）は、開始点ルールの`target_smarts`ではなく
+エポキシ環とオキセタン環の両方のSMARTS（`pre_reaction.RING_SMARTS`）で環を探すので、chemistryの設定によりません。
 SMARTSが同じ環に複数回一致しても（オキセタンは環のCH2のどちらも1番目に当たる）1つと数えます。
 
 ## 3. 網目構築（Network construction、架橋のみ）

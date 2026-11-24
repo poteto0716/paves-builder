@@ -91,6 +91,12 @@ class ReactiveRings(unittest.TestCase):
         self.assertEqual(len(groups), 2)
         self.assertTrue(all(len(g['heavy']) == 4 and len(g['carbons']) == 2 for g in groups))
         self.assertEqual(pre.ring_name(4), 'oxetane')
+        # Both ring kinds at once, independent of any activation rule.
+        mixed = pre.reactive_ring_groups([epoxy, oxetane])
+        self.assertEqual(sorted(len(g['heavy']) for g in mixed), [3, 3, 3, 4, 4])
+        self.assertEqual(pre.groups_ring_name(mixed), 'reactive ring')
+        self.assertEqual(pre.groups_ring_name(pre.reactive_ring_groups([oxetane])), 'oxetane')
+        self.assertIsNone(pre.groups_ring_name([]))
 
 
 chains_spec = importlib.util.spec_from_file_location('chains', ROOT / 'workflows/crosslinking/chains.py')
