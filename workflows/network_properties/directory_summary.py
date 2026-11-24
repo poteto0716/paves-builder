@@ -118,6 +118,19 @@ def _condition(record, key):
                 solvent_molecules=record['solvent_molecules'] if name else None)
 
 
+def _neutral_label(labels):
+    """Header for a column whose label differs between projects only by the ring name."""
+    from workflows.network_properties.monomer import RING_LABELS
+
+    def neutral(label):
+        for name in RING_LABELS.values():
+            label = label.replace(f'{name} rings', 'Reactive rings').replace(name, 'Reactive ring')
+            label = label.replace(name.lower(), 'reactive ring')
+        return label
+    neutral_labels = {neutral(label) for label in labels}
+    return neutral_labels.pop() if len(neutral_labels) == 1 else ' / '.join(sorted(labels))
+
+
 def _markdown(root, records, errors):
     lines = ['# Project property comparison', '',
         '[Project statistics CSV](projects_summary.csv) · [All replica values CSV](replicas_summary.csv)', '',
@@ -125,7 +138,7 @@ def _markdown(root, records, errors):
         'Cells show mean ± replica SD and [available/requested replicas]. An asterisk means some '
         'available estimates have not passed checks, including smoke runs. Check counts, SEM and '
         'checked-only statistics are in the CSV files.', '',
-        '| Project | Input mode | Completed replicas | Smoke |', '|---|---|---:|---|']
+        '| Project | Input mode | Chemistry | Completed replicas | Smoke |', '|---|---|---|---:|---|']
 
     def escape(text):
         return str(text).replace('|', '\\|').replace('\n', ' ')
@@ -138,13 +151,17 @@ def _markdown(root, records, errors):
 
     for record in records:
         m = record['metadata']
-        lines.append(f'| {project_link(record)} | {m["input_mode"]} | '
+        lines.append(f'| {project_link(record)} | {m["input_mode"]} | {m["chemistry"] or "—"} | '
                      f'{m["replicates_completed"]}/{m["replicates_requested"]} | {m["smoke"]} |')
     groups = {}
     for record in records:
         for key, p in record['properties'].items():
             if p['display']:
-                groups.setdefault(p['group'], {})[key,p['unit']] = p['label']
+                groups.setdefault(p['group'], {}).setdefault((key, p['unit']), set()).add(p['label'])
+    # One column per property key: epoxy and oxetane projects share the ring keys (rings.*,
+    # build.reactive_sites), so a column mixing chemistries gets a chemistry-neutral header.
+    groups = {group: {column: labels.pop() if len(labels) == 1 else _neutral_label(labels)
+                      for column, labels in columns.items()} for group, columns in groups.items()}
     for group, columns in groups.items():
         lines += ['', f'**{escape(group)}**', '',
             '| Project | ' + ' | '.join(f'{escape(label)} / {unit}' for (_,unit),label in columns.items()) + ' |',
